@@ -1,0 +1,6 @@
+viser
+numpy
+opencv-python-headless
+OpenEXR
+pillow
+pytest
