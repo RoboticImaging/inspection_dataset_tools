@@ -100,6 +100,12 @@ class AssetDataset:
         self._rgb_dirs = _walk_template(self.root, layout.rgb_dir)
         self._depth_dirs = _walk_template(self.root, layout.depth_dir)
         self._cam_dirs = _walk_template(self.root, layout.cam_dir)
+        mesh_pat = segment_patterns(layout.mesh_file)[0]
+        self.meshes = {
+            m.groupdict().get("kind", f.stem): f
+            for f in sorted(self.root.iterdir())
+            if f.is_file() and (m := mesh_pat.match(f.name))
+        }
         self.variants = sorted(
             {Variant(b.get("traj"), b.get("illumination"), b.get("soil")) for _, b in self._rgb_dirs},
             key=str,

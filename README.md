@@ -11,8 +11,10 @@ venv/bin/python main.py /path/to/glass_house [--port 8080]
 ```
 
 Open the printed URL. GUI: pick trajectory / illumination / soil; Timeline mode with a
-frame slider + Play (video) and an Accumulate toggle for a cumulative point-cloud trail,
-or "All frames" mode, subsampled by the "Frame step" slider to keep the browser alive.
+frame slider + Play (rgb + colorized depth video panels) and an Accumulate toggle for a
+cumulative point-cloud trail, or "All frames" mode, subsampled by the "Frame step" slider
+to keep the browser alive. The Geometry dropdown switches between the unprojected point
+cloud and the GT meshes (`{asset}_{kind}.glb` at the asset root, loaded lazily).
 
 ## When the folder structure changes
 

@@ -10,6 +10,7 @@ class Layout:
     rgb_dir: str = "{illumination}/soil={soil},traj={traj}"
     depth_dir: str = "depths/traj={traj}"
     cam_dir: str = "cam_params/traj={traj}"
+    mesh_file: str = "{name}_{kind}.glb"  # gt meshes at the asset root, keyed by {kind}
     rgb_exts: tuple = (".jpg", ".jpeg", ".png")
     depth_exts: tuple = (".exr",)
     cam_exts: tuple = (".json",)

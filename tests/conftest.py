@@ -34,10 +34,14 @@ def write_cam(path: Path, loc=(0.0, 0.0, 5.0), rot=(1.0, 0.0, 0.0, 0.0)):
 def make_asset(root: Path, layout: Layout = Layout(),
                trajs=("trajA",), illums=("sunny", "night"), soils=("low", "high"),
                n_frames=3, rgb_pad=8, depth_pad=8, cam_pad=8,
-               rgb_ext=".jpg", stem_prefix="") -> Path:
+               rgb_ext=".jpg", stem_prefix="", mesh_kinds=()) -> Path:
     """Build a synthetic asset tree following the given layout's dir templates."""
     def stem(i, pad):
         return f"{stem_prefix}{i:0{pad}d}"
+
+    root.mkdir(parents=True, exist_ok=True)
+    for kind in mesh_kinds:
+        (root / layout.mesh_file.format(name=root.name, kind=kind)).write_bytes(b"glTF")
 
     for traj, illum, soil in itertools.product(trajs, illums, soils):
         binds = {"traj": traj, "illumination": illum, "soil": soil}

@@ -9,11 +9,20 @@ from .dataset import AssetDataset, Variant
 
 FRUSTUM_IMG_W = 160
 PANEL_IMG_W = 480
+GLTF_TO_Z_UP = (2**-0.5, 2**-0.5, 0.0, 0.0)  # wxyz, +90 deg about x
 
 
 def _resize(img: np.ndarray, width: int) -> np.ndarray:
     h = max(1, round(img.shape[0] * width / img.shape[1]))
     return cv2.resize(img, (width, h), interpolation=cv2.INTER_AREA)
+
+
+def colorize_depth(depth: np.ndarray, lo: float, hi: float) -> np.ndarray:
+    valid = np.isfinite(depth) & (depth > 0)
+    t = np.clip((np.nan_to_num(depth) - lo) / max(hi - lo, 1e-6), 0, 1)
+    img = cv2.applyColorMap((t * 255).astype(np.uint8), cv2.COLORMAP_TURBO)
+    img[~valid] = 0
+    return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
 
 class Viewer:
@@ -24,7 +33,9 @@ class Viewer:
         self.seq = None
         self._frustums = {}   # frame idx -> handle
         self._clouds = {}     # frame idx -> handle | None
-        self._panel_cache = {}  # frame idx -> small rgb
+        self._meshes = {}     # mesh kind -> handle, persists across variants
+        self._panel_cache = {}  # frame idx -> (small rgb, small depth vis)
+        self._depth_range = None
         self._lock = threading.RLock()
         self._counts = ""
         self._build_gui()
@@ -53,17 +64,19 @@ class Viewer:
             self._fps = g.add_slider("FPS", min=1, max=30, step=1, initial_value=10)
             self._accumulate = g.add_checkbox("Accumulate", False)
             self._show_frustums = g.add_checkbox("Frustums", True)
-            self._show_clouds = g.add_checkbox("Point clouds", True)
+            geo_opts = ("None", "Point cloud", *(f"mesh: {k}" for k in ds.meshes))
+            self._geometry = g.add_dropdown("Geometry", geo_opts, initial_value="Point cloud")
             self._stride = g.add_slider("Point stride", min=1, max=16, step=1, initial_value=4)
             self._frame_step = g.add_slider("Frame step (all)", min=1, max=32, step=1, initial_value=8)
             self._point_size = g.add_slider("Point size", min=0.005, max=0.2, step=0.005, initial_value=0.03)
             self._frustum_scale = g.add_slider("Frustum scale", min=0.1, max=5.0, step=0.1, initial_value=1.0)
-        self._panel = g.add_image(np.zeros((2, 2, 3), np.uint8), label="Current frame")
+        self._panel = g.add_image(np.zeros((2, 2, 3), np.uint8), label="RGB")
+        self._panel_depth = g.add_image(np.zeros((2, 2, 3), np.uint8), label="Depth")
         self._status = g.add_markdown("")
 
         for h in (self._traj, self._illum, self._soil):
             h.on_update(lambda _: self._load_sequence())
-        for h in (self._mode, self._show_frustums, self._show_clouds, self._frame_step, self._accumulate):
+        for h in (self._mode, self._show_frustums, self._geometry, self._frame_step, self._accumulate):
             h.on_update(lambda _: self._refresh())
         self._frame.on_update(lambda _: self._refresh())
         self._stride.on_update(lambda _: self._reset_clouds())
@@ -83,8 +96,11 @@ class Viewer:
     # ---------------------------------------------------------------- scene
     def _load_sequence(self):
         with self._lock:
-            self.server.scene.reset()
+            for h in [*self._frustums.values(), *self._clouds.values()]:
+                if h is not None:
+                    h.remove()
             self._frustums, self._clouds, self._panel_cache = {}, {}, {}
+            self._depth_range = None
             v = self._variant()
             self.seq = self.ds.sequence(v) if self.ds.has(v) else None
             n = len(self.seq) if self.seq else 0
@@ -114,18 +130,24 @@ class Viewer:
             n = len(self.seq)
             cur = min(self._frame.value, n - 1)
             all_mode = self._mode.value == "All frames"
+            show_clouds = self._geometry.value == "Point cloud"
+            mesh_kind = self._geometry.value.removeprefix("mesh: ") if self._geometry.value.startswith("mesh: ") else None
+            if mesh_kind:
+                self._ensure_mesh(mesh_kind)
+            for k, h in self._meshes.items():
+                h.visible = k == mesh_kind
             targets = set(range(0, n, self._frame_step.value)) if all_mode else {cur}
             for i in sorted(targets):
                 if self._show_frustums.value:
                     self._ensure_frustum(i)
-                if self._show_clouds.value:
+                if show_clouds:
                     self._ensure_cloud(i)
             keep = targets | (set(self._clouds) if not all_mode and self._accumulate.value else set())
             for i, h in self._frustums.items():
                 h.visible = self._show_frustums.value and i in targets
             for i, h in self._clouds.items():
                 if h is not None:
-                    h.visible = self._show_clouds.value and i in keep
+                    h.visible = show_clouds and i in keep
             # prune only after the new content is live, so playback never blinks
             for i in [k for k in self._clouds if k not in keep]:
                 h = self._clouds.pop(i)
@@ -162,10 +184,27 @@ class Viewer:
             point_size=self._point_size.value, point_shape="rounded", visible=False,
         )
 
+    def _ensure_mesh(self, kind: str):
+        if kind in self._meshes:
+            return
+        self._status.content = f"loading mesh '{kind}'..."
+        self._meshes[kind] = self.server.scene.add_glb(
+            f"/meshes/{kind}", self.ds.meshes[kind].read_bytes(),
+            wxyz=GLTF_TO_Z_UP, visible=False,
+        )
+
     def _update_panel(self, i: int):
         if i not in self._panel_cache:
-            self._panel_cache[i] = _resize(self.seq[i].rgb(), PANEL_IMG_W)
-        self._panel.image = self._panel_cache[i]
+            rgb = _resize(self.seq[i].rgb(), PANEL_IMG_W)
+            depth = self.seq[i].depth()
+            if depth is None:
+                vis = np.zeros_like(rgb)
+            else:
+                if self._depth_range is None:
+                    self._depth_range = np.percentile(depth[np.isfinite(depth)], [2, 98])
+                vis = colorize_depth(_resize(depth, PANEL_IMG_W), *self._depth_range)
+            self._panel_cache[i] = (rgb, vis)
+        self._panel.image, self._panel_depth.image = self._panel_cache[i]
 
     # ----------------------------------------------------------------- run
     def run(self):

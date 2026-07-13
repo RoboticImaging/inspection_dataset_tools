@@ -120,6 +120,21 @@ def test_unproject_plane(asset):
     assert len(pts_far) < len(pts)
 
 
+def test_mesh_discovery(tmp_path):
+    ds = AssetDataset(make_asset(tmp_path / "house", mesh_kinds=("accuracy", "completeness")))
+    assert set(ds.meshes) == {"accuracy", "completeness"}
+    assert all(p.is_file() for p in ds.meshes.values())
+    assert AssetDataset(make_asset(tmp_path / "bare")).meshes == {}
+
+
+def test_mesh_custom_template(tmp_path):
+    layout = Layout(mesh_file="gt_{kind}.glb")
+    root = tmp_path / "a"
+    make_asset(root, layout=layout)
+    (root / "gt_full.glb").write_bytes(b"glTF")
+    assert set(AssetDataset(root, layout=layout).meshes) == {"full"}
+
+
 def test_depth_scale(tmp_path):
     layout = Layout(depth_scale=0.01)
     ds = AssetDataset(make_asset(tmp_path / "a"), layout=layout)
@@ -131,6 +146,7 @@ def test_real_glass_house_matches_colmap_gt():
     ds = AssetDataset(GLASS_HOUSE)
     assert "trendspek" in ds.trajectories
     assert set(ds.soils) == {"high", "low", "medium", "verylow"}
+    assert set(ds.meshes) == {"accuracy", "completeness"}
     seq = ds.sequence(Variant("trendspek", ds.illuminations[0], "low"))
     assert len(seq) == 96
     cam = seq[0].camera()
