@@ -6,9 +6,11 @@ import numpy as np
 import viser
 
 from .dataset import AssetDataset, Variant
+from .mesh import load_mesh_for_vis
 
 FRUSTUM_IMG_W = 160
 PANEL_IMG_W = 480
+MESH_MAX_FACES = 1_000_000
 GLTF_TO_Z_UP = (2**-0.5, 2**-0.5, 0.0, 0.0)  # wxyz, +90 deg about x
 
 
@@ -26,8 +28,9 @@ def colorize_depth(depth: np.ndarray, lo: float, hi: float) -> np.ndarray:
 
 
 class Viewer:
-    def __init__(self, dataset: AssetDataset, port: int = 8080):
+    def __init__(self, dataset: AssetDataset, port: int = 8080, mesh_max_faces: int = MESH_MAX_FACES):
         self.ds = dataset
+        self.mesh_max_faces = mesh_max_faces
         self.server = viser.ViserServer(port=port)
         self.server.scene.set_up_direction("+z")
         self.seq = None
@@ -135,7 +138,8 @@ class Viewer:
             if mesh_kind:
                 self._ensure_mesh(mesh_kind)
             for k, h in self._meshes.items():
-                h.visible = k == mesh_kind
+                if h is not None:
+                    h.visible = k == mesh_kind
             targets = set(range(0, n, self._frame_step.value)) if all_mode else {cur}
             for i in sorted(targets):
                 if self._show_frustums.value:
@@ -187,11 +191,24 @@ class Viewer:
     def _ensure_mesh(self, kind: str):
         if kind in self._meshes:
             return
-        self._status.content = f"loading mesh '{kind}'..."
-        self._meshes[kind] = self.server.scene.add_glb(
-            f"/meshes/{kind}", self.ds.meshes[kind].read_bytes(),
-            wxyz=GLTF_TO_Z_UP, visible=False,
-        )
+        self._meshes[kind] = None  # marks "loading" so we spawn only one worker
+        self._status.content = f"baking mesh '{kind}' in the background (cached after first run)..."
+
+        def work():
+            try:
+                mesh = load_mesh_for_vis(self.ds.meshes[kind], max_faces=self.mesh_max_faces)
+            except Exception as e:
+                with self._lock:
+                    self._meshes.pop(kind, None)
+                    self._status.content = f"mesh '{kind}' failed: {e}"
+                return
+            with self._lock:
+                self._meshes[kind] = self.server.scene.add_mesh_trimesh(
+                    f"/meshes/{kind}", mesh, wxyz=GLTF_TO_Z_UP, visible=False,
+                )
+                self._refresh()
+
+        threading.Thread(target=work, daemon=True).start()
 
     def _update_panel(self, i: int):
         if i not in self._panel_cache:

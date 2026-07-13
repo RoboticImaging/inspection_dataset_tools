@@ -1,5 +1,7 @@
 viser
 numpy
+trimesh
+fast-simplification
 opencv-python-headless
 OpenEXR
 pillow

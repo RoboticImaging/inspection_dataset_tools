@@ -14,7 +14,9 @@ Open the printed URL. GUI: pick trajectory / illumination / soil; Timeline mode 
 frame slider + Play (rgb + colorized depth video panels) and an Accumulate toggle for a
 cumulative point-cloud trail, or "All frames" mode, subsampled by the "Frame step" slider
 to keep the browser alive. The Geometry dropdown switches between the unprojected point
-cloud and the GT meshes (`{asset}_{kind}.glb` at the asset root, loaded lazily).
+cloud and the GT meshes (`{asset}_{kind}.glb` at the asset root). Meshes are merged,
+texture-baked to vertex colors, and decimated to `--mesh-faces` (default 1M) for the
+browser; the result is cached in `~/.cache/inspection_viz/`, so only the first load is slow.
 
 ## When the folder structure changes
 
