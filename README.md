@@ -1,13 +1,13 @@
-# inspection_dataset_visualizer
+# inspection_dataset_tools
 
 Dataloader + viser visualizer for inspection assets (rgb / depth / camera per frame,
 organized by trajectory × illumination × soil).
 
-## Run
+## Run visualizer
 
 ```bash
 venv/bin/pip install -r requirements.txt
-venv/bin/python main.py [/path/to/glass_house] [--port 8080]
+venv/bin/python vis.py [--port 8080]
 ```
 
 The asset path is optional — with no argument the viewer starts empty and you type a path
@@ -22,7 +22,7 @@ cloud and the GT meshes (`{asset}_{kind}.glb` at the asset root). Meshes are mer
 texture-baked to vertex colors, and decimated to `--mesh-faces` (default 1M) for the
 browser; the result is cached in `~/.cache/inspection_viz/`, so only the first load is slow.
 
-## When the folder structure changes
+## When the data folder structure changes
 
 Everything about the layout lives in `inspection_viz/config.py` (`Layout`). Edit the dir
 templates / extensions there, or pass a custom one:
