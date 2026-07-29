@@ -1,5 +1,6 @@
 import threading
 import time
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -28,21 +29,24 @@ def colorize_depth(depth: np.ndarray, lo: float, hi: float) -> np.ndarray:
 
 
 class Viewer:
-    def __init__(self, dataset: AssetDataset, port: int = 8080, mesh_max_faces: int = MESH_MAX_FACES):
-        self.ds = dataset
+    def __init__(self, dataset: AssetDataset | str | Path | None = None,
+                 port: int = 8080, mesh_max_faces: int = MESH_MAX_FACES):
+        self.ds = None
         self.mesh_max_faces = mesh_max_faces
         self.server = viser.ViserServer(port=port)
         self.server.scene.set_up_direction("+z")
         self.seq = None
         self._frustums = {}   # frame idx -> handle
         self._clouds = {}     # frame idx -> handle | None
-        self._meshes = {}     # mesh kind -> handle, persists across variants
+        self._meshes = {}     # mesh kind -> handle | None (None = bake in flight)
         self._panel_cache = {}  # frame idx -> (small rgb, small depth vis)
         self._depth_range = None
         self._lock = threading.RLock()
         self._counts = ""
+        self._gen = 0         # bumped per asset load; stale workers drop their result
+        self._suspend = False  # ignore gui callbacks while rebuilding dropdowns
         self._build_gui()
-        self._load_sequence()
+        self.load_asset(dataset) if dataset is not None else self._load_sequence()
         self.server.on_client_connect(self._frame_client)
 
     def _frame_client(self, client: viser.ClientHandle):
@@ -55,11 +59,14 @@ class Viewer:
 
     # ------------------------------------------------------------------ gui
     def _build_gui(self):
-        g, ds = self.server.gui, self.ds
+        g = self.server.gui
+        with g.add_folder("Asset"):
+            self._path = g.add_text("Path", "", hint="asset folder, e.g. /data/glass_house")
+            self._load_btn = g.add_button("Load")
         with g.add_folder("Data"):
-            self._traj = g.add_dropdown("Trajectory", ds.trajectories or ["-"])
-            self._illum = g.add_dropdown("Illumination", ds.illuminations or ["-"])
-            self._soil = g.add_dropdown("Soil", ds.soils or ["-"])
+            self._traj = g.add_dropdown("Trajectory", ["-"])
+            self._illum = g.add_dropdown("Illumination", ["-"])
+            self._soil = g.add_dropdown("Soil", ["-"])
         with g.add_folder("View"):
             self._mode = g.add_dropdown("Mode", ("Timeline", "All frames"))
             self._frame = g.add_slider("Frame", min=0, max=1, step=1, initial_value=0)
@@ -67,8 +74,7 @@ class Viewer:
             self._fps = g.add_slider("FPS", min=1, max=30, step=1, initial_value=10)
             self._accumulate = g.add_checkbox("Accumulate", False)
             self._show_frustums = g.add_checkbox("Frustums", True)
-            geo_opts = ("None", "Point cloud", *(f"mesh: {k}" for k in ds.meshes))
-            self._geometry = g.add_dropdown("Geometry", geo_opts, initial_value="Point cloud")
+            self._geometry = g.add_dropdown("Geometry", ("None", "Point cloud"), initial_value="Point cloud")
             self._stride = g.add_slider("Point stride", min=1, max=16, step=1, initial_value=4)
             self._frame_step = g.add_slider("Frame step (all)", min=1, max=32, step=1, initial_value=8)
             self._point_size = g.add_slider("Point size", min=0.005, max=0.2, step=0.005, initial_value=0.03)
@@ -77,10 +83,11 @@ class Viewer:
         self._panel_depth = g.add_image(np.zeros((2, 2, 3), np.uint8), label="Depth")
         self._status = g.add_markdown("")
 
+        self._load_btn.on_click(lambda _: self.load_asset(self._path.value))
         for h in (self._traj, self._illum, self._soil):
-            h.on_update(lambda _: self._load_sequence())
+            h.on_update(lambda _: self._suspend or self._load_sequence())
         for h in (self._mode, self._show_frustums, self._geometry, self._frame_step, self._accumulate):
-            h.on_update(lambda _: self._refresh())
+            h.on_update(lambda _: self._suspend or self._refresh())
         self._frame.on_update(lambda _: self._refresh())
         self._stride.on_update(lambda _: self._reset_clouds())
         self._point_size.on_update(lambda _: self._apply(self._clouds, "point_size", self._point_size.value))
@@ -97,13 +104,51 @@ class Viewer:
                 setattr(h, attr, value)
 
     # ---------------------------------------------------------------- scene
+    def load_asset(self, source: AssetDataset | str | Path | None):
+        """Swap the asset. Drops every scene object and cache of the previous one."""
+        with self._lock:
+            self._gen += 1  # in-flight mesh bakes belong to the old asset now
+            self._clear_scene(meshes=True)
+            self.ds = self.seq = None
+            try:
+                self.ds = source if isinstance(source, AssetDataset) else AssetDataset(str(source).strip())
+            except Exception as e:
+                self._status.content = f"cannot load asset: {e}"
+                return
+            ds = self.ds
+            self._suspend = True
+            try:
+                self._path.value = str(ds.root)
+                self._traj.options = ds.trajectories or ["-"]
+                self._illum.options = ds.illuminations or ["-"]
+                self._soil.options = ds.soils or ["-"]
+                geo = self._geometry.value
+                self._geometry.options = ("None", "Point cloud", *(f"mesh: {k}" for k in ds.meshes))
+                self._geometry.value = geo if geo in self._geometry.options else "Point cloud"
+            finally:
+                self._suspend = False
+            self._load_sequence()
+            for client in self.server.get_clients().values():
+                self._frame_client(client)
+
+    def _clear_scene(self, meshes: bool = False):
+        handles = [*self._frustums.values(), *self._clouds.values()]
+        if meshes:
+            handles += list(self._meshes.values())
+            self._meshes = {}
+        for h in handles:
+            if h is not None:
+                h.remove()
+        self._frustums, self._clouds, self._panel_cache = {}, {}, {}
+        self._depth_range = None
+
     def _load_sequence(self):
         with self._lock:
-            for h in [*self._frustums.values(), *self._clouds.values()]:
-                if h is not None:
-                    h.remove()
-            self._frustums, self._clouds, self._panel_cache = {}, {}, {}
-            self._depth_range = None
+            self._clear_scene()
+            if self.ds is None:
+                self.seq = None
+                self._status.content = "no asset loaded — enter a path above"
+                return
             v = self._variant()
             self.seq = self.ds.sequence(v) if self.ds.has(v) else None
             n = len(self.seq) if self.seq else 0
@@ -193,16 +238,20 @@ class Viewer:
             return
         self._meshes[kind] = None  # marks "loading" so we spawn only one worker
         self._status.content = f"baking mesh '{kind}' in the background (cached after first run)..."
+        gen, path = self._gen, self.ds.meshes[kind]
 
         def work():
             try:
-                mesh = load_mesh_for_vis(self.ds.meshes[kind], max_faces=self.mesh_max_faces)
+                mesh = load_mesh_for_vis(path, max_faces=self.mesh_max_faces)
             except Exception as e:
                 with self._lock:
-                    self._meshes.pop(kind, None)
-                    self._status.content = f"mesh '{kind}' failed: {e}"
+                    if gen == self._gen:
+                        self._meshes.pop(kind, None)
+                        self._status.content = f"mesh '{kind}' failed: {e}"
                 return
             with self._lock:
+                if gen != self._gen:  # asset changed while baking; drop it
+                    return
                 self._meshes[kind] = self.server.scene.add_mesh_trimesh(
                     f"/meshes/{kind}", mesh, wxyz=GLTF_TO_Z_UP, visible=False,
                 )

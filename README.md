@@ -7,8 +7,12 @@ organized by trajectory × illumination × soil).
 
 ```bash
 venv/bin/pip install -r requirements.txt
-venv/bin/python main.py /path/to/glass_house [--port 8080]
+venv/bin/python main.py [/path/to/glass_house] [--port 8080]
 ```
+
+The asset path is optional — with no argument the viewer starts empty and you type a path
+into the "Asset" field and hit Load. Switching assets drops all scene objects and caches of
+the previous one, so you can browse many assets in one session.
 
 Open the printed URL. GUI: pick trajectory / illumination / soil; Timeline mode with a
 frame slider + Play (rgb + colorized depth video panels) and an Accumulate toggle for a
