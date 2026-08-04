@@ -14,6 +14,7 @@ class Variant:
     traj: str | None = None
     illumination: str | None = None
     soil: str | None = None
+    reflectivity: str | None = None
 
     def as_dict(self) -> dict:
         return {k: v for k, v in self.__dict__.items() if v is not None}
@@ -60,8 +61,21 @@ class Sequence:
         return iter(self.frames)
 
 
-def _walk_template(root: Path, template: str) -> list[tuple[Path, dict]]:
-    """Dirs under root matching the template, with placeholder bindings."""
+def _walk_template(root: Path, template: str | tuple[str, ...]) -> list[tuple[Path, dict]]:
+    """Dirs under root matching the template(s), with placeholder bindings.
+
+    A template may be a tuple of alternatives (e.g. soil-varying vs. reflectivity-varying
+    paths that can never both apply); hits from every alternative are merged.
+    """
+    if not isinstance(template, str):
+        hits, seen = [], set()
+        for t in template:
+            for d, binds in _walk_template(root, t):
+                if d not in seen:
+                    seen.add(d)
+                    hits.append((d, binds))
+        return hits
+
     hits = []
 
     def rec(d: Path, pats, binds):
@@ -107,7 +121,8 @@ class AssetDataset:
             if f.is_file() and (m := mesh_pat.match(f.name))
         }
         self.variants = sorted(
-            {Variant(b.get("traj"), b.get("illumination"), b.get("soil")) for _, b in self._rgb_dirs},
+            {Variant(b.get("traj"), b.get("illumination"), b.get("soil"), b.get("reflectivity"))
+             for _, b in self._rgb_dirs},
             key=str,
         )
         self._frame_id = re.compile(layout.frame_id)
@@ -126,6 +141,24 @@ class AssetDataset:
     @property
     def soils(self) -> list[str]:
         return self._values("soil")
+
+    @property
+    def reflectivities(self) -> list[str]:
+        return self._values("reflectivity")
+
+    def axes(self, traj: str | None, illumination: str | None) -> dict[str, list[str]]:
+        """Which of {soil, reflectivity} can be varied for this (traj, illumination), and
+        with which values. Soil and reflectivity are never both varied at once, so this is
+        how the UI discovers which single axis is on offer (sometimes both, sometimes one)."""
+        matches = [v for v in self.variants
+                   if (traj is None or v.traj == traj)
+                   and (illumination is None or v.illumination == illumination)]
+        out = {}
+        for field in ("soil", "reflectivity"):
+            vals = sorted({getattr(v, field) for v in matches if getattr(v, field) is not None})
+            if vals:
+                out[field] = vals
+        return out
 
     def has(self, variant: Variant) -> bool:
         return self._dir(self._rgb_dirs, variant, exact=True) is not None

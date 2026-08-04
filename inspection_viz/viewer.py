@@ -66,7 +66,11 @@ class Viewer:
         with g.add_folder("Data"):
             self._traj = g.add_dropdown("Trajectory", ["-"])
             self._illum = g.add_dropdown("Illumination", ["-"])
-            self._soil = g.add_dropdown("Soil", ["-"])
+            # Soil and reflectivity are never both varied at once (the asset only ever
+            # sweeps one at a time for a given traj+illumination), so a single "vary" axis
+            # picks which one is in play, and one dropdown supplies its value.
+            self._axis = g.add_button_group("Vary", ("soil",))
+            self._axis_value = g.add_dropdown("Soil", ["-"])
         with g.add_folder("View"):
             self._mode = g.add_dropdown("Mode", ("Timeline", "All frames"))
             self._frame = g.add_slider("Frame", min=0, max=1, step=1, initial_value=0)
@@ -84,8 +88,10 @@ class Viewer:
         self._status = g.add_markdown("")
 
         self._load_btn.on_click(lambda _: self.load_asset(self._path.value))
-        for h in (self._traj, self._illum, self._soil):
-            h.on_update(lambda _: self._suspend or self._load_sequence())
+        for h in (self._traj, self._illum):
+            h.on_update(lambda _: self._suspend or self._on_axis_change())
+        self._axis.on_click(lambda _: self._suspend or self._on_axis_change())
+        self._axis_value.on_update(lambda _: self._suspend or self._load_sequence())
         for h in (self._mode, self._show_frustums, self._geometry, self._frame_step, self._accumulate):
             h.on_update(lambda _: self._suspend or self._refresh())
         self._frame.on_update(lambda _: self._refresh())
@@ -95,7 +101,38 @@ class Viewer:
 
     def _variant(self) -> Variant:
         pick = lambda h: None if h.value == "-" else h.value
-        return Variant(pick(self._traj), pick(self._illum), pick(self._soil))
+        axis, val = self._axis.value, pick(self._axis_value)
+        return Variant(pick(self._traj), pick(self._illum),
+                       soil=val if axis == "soil" else None,
+                       reflectivity=val if axis == "reflectivity" else None)
+
+    def _on_axis_change(self):
+        """Traj/illumination/vary-toggle changed: re-derive the axis dropdowns, then reload."""
+        self._suspend = True
+        try:
+            self._sync_axes()
+        finally:
+            self._suspend = False
+        self._load_sequence()
+
+    def _sync_axes(self):
+        """Refresh the Vary toggle and its value dropdown for the current traj+illumination.
+
+        Soil and reflectivity are only ever swept one at a time for a given traj+illumination
+        (never both), so at most one is "on offer" at once — this discovers which, exposes the
+        toggle only when both exist, and repopulates the value list to match.
+        """
+        pick = lambda h: None if h.value == "-" else h.value
+        axes = self.ds.axes(pick(self._traj), pick(self._illum)) if self.ds else {}
+        keys = list(axes) or ["-"]
+        self._axis.options = tuple(keys)
+        if self._axis.value not in keys:
+            self._axis.value = keys[0]
+        self._axis.visible = len(keys) > 1
+        axis = self._axis.value
+        self._axis_value.label = axis.capitalize() if axis in axes else "Value"
+        self._axis_value.options = axes.get(axis) or ["-"]  # dropdown resets .value if stale
+        self._axis_value.visible = axis in axes
 
     @staticmethod
     def _apply(handles: dict, attr: str, value):
@@ -121,7 +158,7 @@ class Viewer:
                 self._path.value = str(ds.root)
                 self._traj.options = ds.trajectories or ["-"]
                 self._illum.options = ds.illuminations or ["-"]
-                self._soil.options = ds.soils or ["-"]
+                self._sync_axes()
                 geo = self._geometry.value
                 self._geometry.options = ("None", "Point cloud", *(f"mesh: {k}" for k in ds.meshes))
                 self._geometry.value = geo if geo in self._geometry.options else "Point cloud"

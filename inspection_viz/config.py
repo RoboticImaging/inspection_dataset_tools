@@ -6,8 +6,13 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class Layout:
-    # Dir templates relative to the asset root. Placeholders: {traj} {illumination} {soil}.
-    rgb_dir: str = "{illumination}/soil={soil},traj={traj}"
+    # Dir templates relative to the asset root. Placeholders: {traj} {illumination} {soil} {reflectivity}.
+    # Soil and reflectivity are varied one at a time (never both), so each gets its own template;
+    # every template is tried and the resulting dirs are merged.
+    rgb_dir: tuple = (
+        "{illumination}/soil={soil},traj={traj}",
+        "{illumination}/ref={reflectivity},traj={traj}",
+    )
     depth_dir: str = "depths/traj={traj}"
     cam_dir: str = "cam_params/traj={traj}"
     mesh_file: str = "{name}_{kind}.glb"  # gt meshes at the asset root, keyed by {kind}
