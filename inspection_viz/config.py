@@ -15,6 +15,10 @@ class Layout:
     )
     depth_dir: str = "depths/traj={traj}"
     cam_dir: str = "cam_params/traj={traj}"
+    # Baseline predictions live alongside gt data, keyed by {method} (e.g. "da3"). Same frame-id
+    # / extension conventions as depth_dir/cam_dir, so they're indexed with the same code path.
+    pred_depth_dir: str = "predictions/{method}/depths/traj={traj}"
+    pred_cam_dir: str = "predictions/{method}/cam_params/traj={traj}"
     mesh_file: str = "{name}_{kind}.glb"  # gt meshes at the asset root, keyed by {kind}
     rgb_exts: tuple = (".jpg", ".jpeg", ".png")
     depth_exts: tuple = (".exr",)

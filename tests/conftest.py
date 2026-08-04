@@ -43,9 +43,10 @@ def make_asset(root: Path, layout: Layout = Layout(),
     for kind in mesh_kinds:
         (root / layout.mesh_file.format(name=root.name, kind=kind)).write_bytes(b"glTF")
 
+    rgb_template = layout.rgb_dir[0] if isinstance(layout.rgb_dir, tuple) else layout.rgb_dir
     for traj, illum, soil in itertools.product(trajs, illums, soils):
         binds = {"traj": traj, "illumination": illum, "soil": soil}
-        rgb_dir = root / layout.rgb_dir.format(**binds)
+        rgb_dir = root / rgb_template.format(**binds)
         rgb_dir.mkdir(parents=True, exist_ok=True)
         for i in range(n_frames):
             write_rgb(rgb_dir / (stem(i, rgb_pad) + rgb_ext))
@@ -59,6 +60,18 @@ def make_asset(root: Path, layout: Layout = Layout(),
             write_depth_exr(depth_dir / (stem(i, depth_pad) + ".exr"))
             write_cam(cam_dir / (stem(i, cam_pad) + ".json"))
     return root
+
+
+def make_predictions(root: Path, layout: Layout, method: str, binds: dict, n_frames=3, pad=8):
+    """Write synthetic predictions/{method}/... files for one variant, following the layout."""
+    kw = {"method": method, **binds}
+    depth_dir = root / layout.pred_depth_dir.format(**kw)
+    cam_dir = root / layout.pred_cam_dir.format(**kw)
+    depth_dir.mkdir(parents=True, exist_ok=True)
+    cam_dir.mkdir(parents=True, exist_ok=True)
+    for i in range(n_frames):
+        write_depth_exr(depth_dir / f"{i:0{pad}d}.exr", value=1.0)
+        write_cam(cam_dir / f"{i:0{pad}d}.json")
 
 
 @pytest.fixture

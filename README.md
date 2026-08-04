@@ -22,6 +22,18 @@ cloud and the GT meshes (`{asset}_{kind}.glb` at the asset root). Meshes are mer
 texture-baked to vertex colors, and decimated to `--mesh-faces` (default 1M) for the
 browser; the result is cached in `~/.cache/inspection_viz/`, so only the first load is slow.
 
+The **Source** dropdown switches the depth/cam data driving the point cloud and depth panel
+between `gt` and any baseline that has written predictions for the loaded asset (see
+Baselines below) — rgb is always ground truth either way.
+
+## Baselines
+
+Each submodule (e.g. `depth-anything-3/`) is a baseline model; its Docker image, run script,
+and per-sequence config live in [`baselines/`](baselines/), which writes depth + camera
+predictions back into `<asset>/predictions/<method>/...`, in the same file formats as ground
+truth. See [`baselines/README.md`](baselines/README.md) for how to run one and how to add a
+new one. Once predictions exist, they show up in the viewer's Source dropdown automatically.
+
 ## When the data folder structure changes
 
 Everything about the layout lives in `inspection_viz/config.py` (`Layout`). Edit the dir
@@ -48,5 +60,7 @@ venv/bin/python -m pytest tests/
 ```
 
 Cover: png/jpg swap, zero-padding changes, stem prefixes, restructured folder trees,
-missing depth/cams, junk files, sparse variant combos, unprojection math, and a check of
-real-data poses against the COLMAP ground truth (skipped if `glass_house` is absent).
+missing depth/cams, junk files, sparse variant combos, unprojection math, baseline
+prediction discovery/selection, the baseline output writer's round-trip through
+`Camera.from_blender`, and a check of real-data poses against the COLMAP ground truth
+(skipped if `glass_house` is absent).

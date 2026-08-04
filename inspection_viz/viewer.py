@@ -71,6 +71,7 @@ class Viewer:
             # picks which one is in play, and one dropdown supplies its value.
             self._axis = g.add_button_group("Vary", ("soil",))
             self._axis_value = g.add_dropdown("Soil", ["-"])
+            self._source = g.add_dropdown("Source", ["gt"])
         with g.add_folder("View"):
             self._mode = g.add_dropdown("Mode", ("Timeline", "All frames"))
             self._frame = g.add_slider("Frame", min=0, max=1, step=1, initial_value=0)
@@ -92,6 +93,7 @@ class Viewer:
             h.on_update(lambda _: self._suspend or self._on_axis_change())
         self._axis.on_click(lambda _: self._suspend or self._on_axis_change())
         self._axis_value.on_update(lambda _: self._suspend or self._load_sequence())
+        self._source.on_update(lambda _: self._suspend or self._load_sequence())
         for h in (self._mode, self._show_frustums, self._geometry, self._frame_step, self._accumulate):
             h.on_update(lambda _: self._suspend or self._refresh())
         self._frame.on_update(lambda _: self._refresh())
@@ -159,6 +161,9 @@ class Viewer:
                 self._traj.options = ds.trajectories or ["-"]
                 self._illum.options = ds.illuminations or ["-"]
                 self._sync_axes()
+                src = self._source.value
+                self._source.options = ("gt", *ds.methods)
+                self._source.value = src if src in self._source.options else "gt"
                 geo = self._geometry.value
                 self._geometry.options = ("None", "Point cloud", *(f"mesh: {k}" for k in ds.meshes))
                 self._geometry.value = geo if geo in self._geometry.options else "Point cloud"
@@ -186,13 +191,16 @@ class Viewer:
                 self.seq = None
                 self._status.content = "no asset loaded — enter a path above"
                 return
-            v = self._variant()
-            self.seq = self.ds.sequence(v) if self.ds.has(v) else None
+            v, source = self._variant(), self._source.value
+            try:
+                self.seq = self.ds.sequence(v, source) if self.ds.has(v) else None
+            except KeyError:
+                self.seq = None
             n = len(self.seq) if self.seq else 0
             self._frame.max = max(1, n - 1)
             self._frame.value = min(self._frame.value, max(0, n - 1))
             if not self.seq:
-                self._status.content = f"no data for {v.as_dict()}"
+                self._status.content = f"no data for {v.as_dict()} (source={source})"
                 return
             n_depth = sum(f.depth_path is not None for f in self.seq)
             n_cam = sum(f.cam_path is not None for f in self.seq)
