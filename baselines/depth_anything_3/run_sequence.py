@@ -65,6 +65,18 @@ def _w2c_to_c2w(w2c: np.ndarray) -> np.ndarray:
     return np.linalg.inv(w2c)
 
 
+def _align_chunk_to_gt_frame0(c2ws: np.ndarray, gt_c2w0: np.ndarray) -> np.ndarray:
+    """DA3 reasons in its own arbitrary world gauge when it isn't conditioned on known poses
+    (world frame anchored to whichever frame `ref_view_strategy` picked as reference, at an
+    unrecoverable scale) -- so raw predicted poses land nowhere near the gt trajectory even
+    though the *shape* of the trajectory is right. Rigidly rotate+translate the whole chunk so
+    its first frame's pose exactly matches the known gt pose for that frame; this only fixes
+    position/orientation (6 of the 7 similarity-transform DOF) -- one frame can't disambiguate
+    DA3's scale too, so depth/translations are left at DA3's own scale."""
+    align = gt_c2w0 @ np.linalg.inv(c2ws[0])
+    return align @ c2ws
+
+
 def run_chunk(model: DepthAnything3, frames: list[Frame], cfg: ModelConfig) -> Prediction:
     ext = ints = None
     if cfg.use_known_poses:
@@ -103,6 +115,8 @@ def main():
     for chunk in chunks:
         pred = run_chunk(model, chunk, cfg.model)
         proc_width = pred.processed_images.shape[2]
+        c2ws = np.stack([_w2c_to_c2w(pred.extrinsics[j]) for j in range(len(chunk))])
+        c2ws = _align_chunk_to_gt_frame0(c2ws, chunk[0].camera().c2w)
         for j, f in enumerate(chunk):
             width, height = image_size(f.rgb_path)
             depth = cv2.resize(pred.depth[j], (width, height), interpolation=cv2.INTER_LINEAR)
@@ -113,8 +127,7 @@ def main():
                 depth = np.where(conf >= cfg.output.min_confidence, depth, np.nan).astype(np.float32)
             stem = frame_stem(f.index)
             write_depth(depth_dir / f"{stem}.exr", depth)
-            write_cam(cam_dir / f"{stem}.json", _w2c_to_c2w(pred.extrinsics[j]), pred.intrinsics[j],
-                      width=proc_width)
+            write_cam(cam_dir / f"{stem}.json", c2ws[j], pred.intrinsics[j], width=proc_width)
         print(f"  wrote frames {chunk[0].index}..{chunk[-1].index}")
 
     print(f"done: predictions/{cfg.output.method}/ under {ds.root}")
