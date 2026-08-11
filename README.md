@@ -1,3 +1,8 @@
+# Run visualizer
+`python vis.py <optional: asset path>`
+
+Alternatively, specify asset path in the web interface
+
 # Baselines
 
 Each submodule under the repo root (e.g. `depth-anything-3/`) is a baseline. Its runner code
