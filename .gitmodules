@@ -1,3 +1,6 @@
 [submodule "depth-anything-3"]
 	path = depth-anything-3
 	url = https://github.com/bytedance-seed/depth-anything-3
+[submodule "VGGT-SLAM"]
+	path = VGGT-SLAM
+	url = git@github.com:MIT-SPARK/VGGT-SLAM.git
