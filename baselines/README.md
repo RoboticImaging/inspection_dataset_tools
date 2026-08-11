@@ -10,18 +10,28 @@ baselines/
   configs/            # example run configs (yaml)
   depth_anything_3/   # one folder per baseline
     Dockerfile
-    run_container.sh
-    run_sequence.py
+    build_container.sh  # build the image
+    run_container.sh    # shell into the image
+    run_sequence.py     # the actual run, from inside the container
 ```
 
 ## Running Depth Anything 3
 
 ```bash
-baselines/depth_anything_3/run_container.sh baselines/configs/da3_glass_house.yaml
+baselines/depth_anything_3/build_container.sh          # once (and after Dockerfile changes)
+baselines/depth_anything_3/run_container.sh            # drops you into a shell in the image
+# then, inside the container:
+python run_sequence.py ../configs/da3_glass_house.yaml
 ```
 
-This builds the Docker image (only takes a while the first time), then runs
-`run_sequence.py` inside it. Edit a copy of `baselines/configs/da3_glass_house.yaml` to point
+The container is just the environment: the host's paths (`/home`, `/mnt`, `/media`) are
+bind-mounted onto **themselves**, so the repo, config yamls and dataset roots are all at their
+normal absolute paths inside — nothing to translate, and code edits need no rebuild. It runs as
+your uid/gid with your supplementary groups, so predictions written from inside are owned by you
+and deletable from outside. Extra host trees: `MOUNTS='/data /nfs' run_container.sh`. GPUs
+default to all; pick some with `GPUS='"device=1"' run_container.sh`.
+
+Edit a copy of `baselines/configs/da3_glass_house.yaml` to point
 `dataset.root` at your asset and pick the trajectory/illumination/soil (or reflectivity) — see
 the comments in that file for every toggle (frame range/stride, model checkpoint, known-pose
 conditioning, confidence filtering, ...).
@@ -35,8 +45,8 @@ whatever `output.method` was set to) for that sequence.
 
 1. `git submodule add <url> <name>` at the repo root.
 2. Copy the `depth_anything_3/` folder as a starting point: `Dockerfile` (install the submodule
-   + `inspection_viz`'s light deps — see comments), `run_container.sh` (usually just the image
-   name changes), `run_sequence.py`.
+   + `inspection_viz`'s light deps — see comments), `build_container.sh` / `run_container.sh`
+   (usually just the image name changes), `run_sequence.py`.
 3. In `run_sequence.py`, use `baselines.common.config.{DatasetSelection,OutputSpec,load_config}`
    for the dataset-selection/output-toggle boilerplate, and your own dataclass for
    model-specific knobs. Load frames with `AssetDataset(...).sequence(variant)` (always `"gt"` —

@@ -2,8 +2,11 @@
 predictions back into the asset folder (predictions/{method}/...), in the same format the
 ground truth is stored in — so inspection_viz's Source toggle picks them up unchanged.
 
-Usage (inside the container built by ../Dockerfile — see run_container.sh):
-    python baselines/depth_anything_3/run_sequence.py --config baselines/configs/da3_glass_house.yaml
+Usage — inside the container (build_container.sh once, then run_container.sh for a shell):
+    python run_sequence.py ../configs/da3_glass_house.yaml
+
+Paths are the same inside the container as on the host, so an absolute config path works too.
+Do not run this outside the container: it needs the image's torch/depth-anything-3 install.
 """
 
 import argparse
@@ -111,7 +114,7 @@ def run_chunk(model: DepthAnything3, frames: list[Frame], cfg: ModelConfig) -> P
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--config", required=True)
+    p.add_argument("config", help="path to a run config yaml, e.g. ../configs/da3_glass_house.yaml")
     args = p.parse_args()
     cfg = load_config(args.config, Config)
 
