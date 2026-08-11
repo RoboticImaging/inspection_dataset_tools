@@ -8,6 +8,7 @@ import OpenEXR
 import pytest
 
 from inspection_viz import Layout
+from inspection_viz.config import fill_template
 
 WH = (8, 6)
 
@@ -62,16 +63,21 @@ def make_asset(root: Path, layout: Layout = Layout(),
     return root
 
 
-def make_predictions(root: Path, layout: Layout, method: str, binds: dict, n_frames=3, pad=8):
+def make_predictions(root: Path, layout: Layout, method: str, binds: dict,
+                     n_frames=3, pad=8, cloud=False):
     """Write synthetic predictions/{method}/... files for one variant, following the layout."""
     kw = {"method": method, **binds}
-    depth_dir = root / layout.pred_depth_dir.format(**kw)
-    cam_dir = root / layout.pred_cam_dir.format(**kw)
+    depth_dir = root / fill_template(layout.pred_depth_dir, **kw)
+    cam_dir = root / fill_template(layout.pred_cam_dir, **kw)
     depth_dir.mkdir(parents=True, exist_ok=True)
     cam_dir.mkdir(parents=True, exist_ok=True)
     for i in range(n_frames):
         write_depth_exr(depth_dir / f"{i:0{pad}d}.exr", value=1.0)
         write_cam(cam_dir / f"{i:0{pad}d}.json")
+    if cloud:
+        ply = root / fill_template(layout.pred_cloud_file, **kw)
+        ply.parent.mkdir(parents=True, exist_ok=True)
+        ply.write_bytes(b"ply\n")
 
 
 @pytest.fixture

@@ -42,7 +42,7 @@ DATASET_ROOT="$(cd "$DATASET_ROOT" && pwd)"  # resolve to absolute, for a matchi
 
 docker build -f "${REPO_ROOT}/baselines/depth_anything_3/Dockerfile" -t "$IMAGE" "$REPO_ROOT"
 
-docker run --rm --gpus all \
+docker run --rm --gpus '"device=1"' \
     -v "${REPO_ROOT}:/workspace" \
     -v "${DATASET_ROOT}:${DATASET_ROOT}" \
     -v "${REPO_ROOT}/.cache/huggingface:/workspace/.cache/huggingface" \

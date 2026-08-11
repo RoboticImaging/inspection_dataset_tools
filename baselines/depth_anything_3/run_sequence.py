@@ -17,7 +17,10 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root: inspection_viz + baselines.common
 
 from baselines.common.config import DatasetSelection, OutputSpec, load_config
-from baselines.common.writer import frame_stem, output_dirs, write_cam, write_depth
+from baselines.common.writer import (
+    cloud_path, frame_stem, output_dirs, write_cam, write_cloud, write_depth,
+)
+from inspection_viz.camera import Camera
 from inspection_viz.dataset import AssetDataset, Frame
 from inspection_viz.io import image_size
 
@@ -77,6 +80,23 @@ def _align_chunk_to_gt_frame0(c2ws: np.ndarray, gt_c2w0: np.ndarray) -> np.ndarr
     return align @ c2ws
 
 
+def _written_camera(c2w: np.ndarray, K: np.ndarray, proc_width: int, width: int, height: int) -> Camera:
+    """The camera exactly as `write_cam` stores it and `Camera.from_blender` reads it back --
+    square pixels, centred principal point, intrinsics rescaled from DA3's process_res to the
+    full frame. Building the cloud from *this* rather than DA3's raw K keeps the .ply identical
+    to what the viewer draws from the same files."""
+    fx = float(K[0, 0]) * width / proc_width
+    K_full = np.array([[fx, 0, width / 2], [0, fx, height / 2], [0, 0, 1]])
+    return Camera(K_full, c2w, width, height)
+
+
+def _subsample(pts: np.ndarray, cols: np.ndarray, max_points: int | None):
+    if max_points is None or len(pts) <= max_points:
+        return pts, cols
+    idx = np.random.default_rng(0).choice(len(pts), max_points, replace=False)
+    return pts[idx], cols[idx]
+
+
 def run_chunk(model: DepthAnything3, frames: list[Frame], cfg: ModelConfig) -> Prediction:
     ext = ints = None
     if cfg.use_known_poses:
@@ -102,6 +122,7 @@ def main():
         raise SystemExit(f"no frames selected for {variant} in {cfg.dataset.root}")
 
     depth_dir, cam_dir = output_dirs(ds.root, ds.layout, cfg.output.method, variant.as_dict())
+    ply_path = cloud_path(ds.root, ds.layout, cfg.output.method, variant.as_dict())
     if not cfg.output.overwrite and depth_dir.exists() and any(depth_dir.iterdir()):
         raise SystemExit(f"{depth_dir} already has output; set output.overwrite: true to replace")
 
@@ -112,6 +133,7 @@ def main():
     chunks = [frames[i:i + cfg.model.chunk_size] for i in range(0, len(frames), cfg.model.chunk_size)]
     print(f"{len(frames)} frames in {len(chunks)} chunk(s) of up to {cfg.model.chunk_size}")
 
+    cloud_pts, cloud_cols = [], []
     for chunk in chunks:
         pred = run_chunk(model, chunk, cfg.model)
         proc_width = pred.processed_images.shape[2]
@@ -128,7 +150,18 @@ def main():
             stem = frame_stem(f.index)
             write_depth(depth_dir / f"{stem}.exr", depth)
             write_cam(cam_dir / f"{stem}.json", c2ws[j], pred.intrinsics[j], width=proc_width)
+            if cfg.output.cloud:
+                cam = _written_camera(c2ws[j], pred.intrinsics[j], proc_width, width, height)
+                pts, cols = cam.unproject(depth, rgb=f.rgb(), stride=cfg.output.cloud_stride)
+                cloud_pts.append(pts)
+                cloud_cols.append(cols)
         print(f"  wrote frames {chunk[0].index}..{chunk[-1].index}")
+
+    if cfg.output.cloud:
+        pts, cols = _subsample(np.concatenate(cloud_pts), np.concatenate(cloud_cols),
+                               cfg.output.cloud_max_points)
+        write_cloud(ply_path, pts, cols)
+        print(f"  wrote {len(pts):,} points -> {ply_path.relative_to(ds.root)}")
 
     print(f"done: predictions/{cfg.output.method}/ under {ds.root}")
 

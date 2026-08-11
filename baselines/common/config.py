@@ -65,3 +65,9 @@ class OutputSpec:
     method: str = "da3"  # subfolder name: predictions/{method}/... (also the viewer's Source label)
     overwrite: bool = False
     min_confidence: float | None = None  # pixels below this get depth=nan; None = keep everything
+    # One fused .ply per variant, unprojected from the predicted depth + poses. `cloud_stride`
+    # subsamples each depth map on a pixel grid; `cloud_max_points` then randomly caps the total
+    # (a 100-frame 1080p sequence is ~200M points at stride 1). None = no cap.
+    cloud: bool = True
+    cloud_stride: int = 4
+    cloud_max_points: int | None = 5_000_000

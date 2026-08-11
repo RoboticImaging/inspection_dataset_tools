@@ -20,6 +20,12 @@ model:
   ref_view_strategy: saddle_balanced
 
 output:
-  method: da3                   # -> predictions/da3/... ; also the viewer's Source label
+  # -> predictions/da3/{illumination}/{depths,cam_params}/soil={soil},traj={traj}/
+  #    predictions/da3/{illumination}/clouds/soil={soil},traj={traj}.ply
+  # (keyed by the full variant, so runs on different illumination/soil never overwrite each other)
+  method: da3                   # also the viewer's Source label
   overwrite: true
   min_confidence: null          # e.g. 0.5 to mask low-confidence pixels to nan
+  cloud: true                   # fused .ply unprojected from the predicted depth + poses
+  cloud_stride: 4               # pixel stride per depth map
+  cloud_max_points: 5000000     # null = no cap

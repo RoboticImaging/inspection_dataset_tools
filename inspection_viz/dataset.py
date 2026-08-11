@@ -61,16 +61,20 @@ class Sequence:
         return iter(self.frames)
 
 
-def _walk_template(root: Path, template: str | tuple[str, ...]) -> list[tuple[Path, dict]]:
-    """Dirs under root matching the template(s), with placeholder bindings.
+def _walk_template(root: Path, template: str | tuple[str, ...],
+                   files: bool = False) -> list[tuple[Path, dict]]:
+    """Paths under root matching the template(s), with placeholder bindings.
 
     A template may be a tuple of alternatives (e.g. soil-varying vs. reflectivity-varying
     paths that can never both apply); hits from every alternative are merged.
+
+    `files=True` matches a *file* at the leaf (e.g. a per-variant .ply); every segment above
+    the leaf is still a directory.
     """
     if not isinstance(template, str):
         hits, seen = [], set()
         for t in template:
-            for d, binds in _walk_template(root, t):
+            for d, binds in _walk_template(root, t, files):
                 if d not in seen:
                     seen.add(d)
                     hits.append((d, binds))
@@ -82,7 +86,10 @@ def _walk_template(root: Path, template: str | tuple[str, ...]) -> list[tuple[Pa
         if not pats:
             hits.append((d, binds))
             return
-        for child in sorted(p for p in d.iterdir() if p.is_dir()):
+        want_file = files and len(pats) == 1  # the leaf, and only for a file template
+        for child in sorted(d.iterdir()):
+            if not (child.is_file() if want_file else child.is_dir()):
+                continue
             m = pats[0].match(child.name)
             if m:
                 rec(child, pats[1:], {**binds, **m.groupdict()})
@@ -116,6 +123,7 @@ class AssetDataset:
         self._cam_dirs = _walk_template(self.root, layout.cam_dir)
         self._pred_depth_dirs = _walk_template(self.root, layout.pred_depth_dir)
         self._pred_cam_dirs = _walk_template(self.root, layout.pred_cam_dir)
+        self._pred_clouds = _walk_template(self.root, layout.pred_cloud_file, files=True)
         mesh_pat = segment_patterns(layout.mesh_file)[0]
         self.meshes = {
             m.groupdict().get("kind", f.stem): f
@@ -168,24 +176,28 @@ class AssetDataset:
         return out
 
     def has(self, variant: Variant) -> bool:
-        return self._dir(self._rgb_dirs, variant.as_dict(), exact=True) is not None
+        return self._match(self._rgb_dirs, variant.as_dict(), exact=True) is not None
+
+    def cloud_path(self, variant: Variant, method: str) -> Path | None:
+        """The fused .ply a baseline wrote for this variant, or None if it didn't write one."""
+        return self._match(self._pred_clouds, {**variant.as_dict(), "method": method})
 
     def sequence(self, variant: Variant, source: str = "gt") -> Sequence:
         """Frames for `variant`. `source` is "gt" or one of `self.methods`, selecting whether
         depth/cam come from ground truth or a baseline's predictions/ output (rgb is always gt —
         baselines consume it, they don't produce it)."""
-        rgb_dir = self._dir(self._rgb_dirs, variant.as_dict(), exact=True)
+        rgb_dir = self._match(self._rgb_dirs, variant.as_dict(), exact=True)
         if rgb_dir is None:
             raise KeyError(f"no data for {variant}")
         lay = self.layout
         rgb = _index_frames(rgb_dir, lay.rgb_exts, self._frame_id)
         if source == "gt":
-            depth_dir = self._dir(self._depth_dirs, variant.as_dict())
-            cam_dir = self._dir(self._cam_dirs, variant.as_dict())
+            depth_dir = self._match(self._depth_dirs, variant.as_dict())
+            cam_dir = self._match(self._cam_dirs, variant.as_dict())
         else:
             want = {**variant.as_dict(), "method": source}
-            depth_dir = self._dir(self._pred_depth_dirs, want)
-            cam_dir = self._dir(self._pred_cam_dirs, want)
+            depth_dir = self._match(self._pred_depth_dirs, want)
+            cam_dir = self._match(self._pred_cam_dirs, want)
             if depth_dir is None and cam_dir is None:
                 raise KeyError(f"no predictions for method={source!r}, {variant}")
         depth = _index_frames(depth_dir, lay.depth_exts, self._frame_id)
@@ -194,7 +206,7 @@ class AssetDataset:
         return Sequence(variant, frames)
 
     @staticmethod
-    def _dir(entries: list[tuple[Path, dict]], want: dict, exact: bool = False) -> Path | None:
+    def _match(entries: list[tuple[Path, dict]], want: dict, exact: bool = False) -> Path | None:
         for d, binds in entries:
             if binds == want if exact else all(want.get(k) == v for k, v in binds.items()):
                 return d

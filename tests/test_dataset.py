@@ -151,7 +151,7 @@ def test_no_methods_without_predictions(asset):
 def test_predictions_discovered_and_selectable(tmp_path):
     layout = Layout()
     root = make_asset(tmp_path / "a", layout=layout)
-    make_predictions(root, layout, "da3", V.as_dict())
+    make_predictions(root, layout, "da3", V.as_dict(), cloud=True)
     ds = AssetDataset(root, layout=layout)
     assert ds.methods == ["da3"]
 
@@ -161,14 +161,18 @@ def test_predictions_discovered_and_selectable(tmp_path):
         assert f.rgb().shape == (6, 8, 3)   # rgb still comes from gt
         assert f.depth() is not None
         assert f.camera() is not None
+    assert ds.cloud_path(V, "da3") == root / "predictions/da3/sunny/clouds/soil=low,traj=trajA.ply"
 
     # a variant with no gt data still 404s the same way regardless of source
     with pytest.raises(KeyError):
         ds.sequence(Variant("nope"), source="da3")
-    # predictions are keyed by traj only (mirroring depth_dir), so they apply across
-    # illumination/soil the same way gt depth does...
-    assert len(ds.sequence(Variant("trajA", "night", "low"), source="da3")) == 3
-    # ...but an unknown method name 404s
+    # predictions are keyed by the *full* variant (unlike gt depth, which is keyed by traj alone):
+    # a baseline infers depth from rgb, so another illumination/soil is a different prediction and
+    # must not be served from -- or clobbered by -- this one.
+    with pytest.raises(KeyError):
+        ds.sequence(Variant("trajA", "night", "low"), source="da3")
+    assert ds.cloud_path(Variant("trajA", "night", "low"), "da3") is None
+    # ...as does an unknown method name
     with pytest.raises(KeyError):
         ds.sequence(V, source="nope")
 

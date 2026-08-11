@@ -17,9 +17,10 @@ from pathlib import Path
 
 import numpy as np
 import OpenEXR
+import trimesh
 
 from inspection_viz.camera import rot_to_quat
-from inspection_viz.config import Layout
+from inspection_viz.config import Layout, fill_template
 
 
 def frame_stem(index: int) -> str:
@@ -27,9 +28,19 @@ def frame_stem(index: int) -> str:
 
 
 def output_dirs(root: Path, layout: Layout, method: str, variant_dict: dict) -> tuple[Path, Path]:
-    """Depth dir, cam dir for `method` + a variant (as `Variant.as_dict()`), under `root`."""
+    """Depth dir, cam dir for `method` + a variant (as `Variant.as_dict()`), under `root`.
+
+    Predictions are keyed by the *full* variant, not just the trajectory: a baseline infers depth
+    from rgb, so each illumination/soil combination is a distinct prediction with its own dir.
+    """
     kw = {"method": method, **variant_dict}
-    return root / layout.pred_depth_dir.format(**kw), root / layout.pred_cam_dir.format(**kw)
+    return (root / fill_template(layout.pred_depth_dir, **kw),
+            root / fill_template(layout.pred_cam_dir, **kw))
+
+
+def cloud_path(root: Path, layout: Layout, method: str, variant_dict: dict) -> Path:
+    """The single fused .ply for `method` + a variant, under `root`."""
+    return root / fill_template(layout.pred_cloud_file, method=method, **variant_dict)
 
 
 def write_depth(path: Path, depth: np.ndarray) -> None:
@@ -39,6 +50,16 @@ def write_depth(path: Path, depth: np.ndarray) -> None:
         {"compression": OpenEXR.ZIP_COMPRESSION, "type": OpenEXR.scanlineimage},
         {"Z": np.ascontiguousarray(depth, dtype=np.float32)},
     ).write(str(path))
+
+
+def write_cloud(path: Path, points: np.ndarray, colors: np.ndarray | None = None) -> None:
+    """Fused world-space point cloud as a binary .ply. `points` (N,3) float, `colors` (N,3) uint8."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cloud = trimesh.PointCloud(
+        np.asarray(points, dtype=np.float32),
+        colors=None if colors is None else np.asarray(colors, dtype=np.uint8),
+    )
+    path.write_bytes(cloud.export(file_type="ply"))
 
 
 def write_cam(path: Path, c2w: np.ndarray, K: np.ndarray, width: int,
