@@ -36,11 +36,6 @@ class ModelConfig:
     hf_repo: str = "depth-anything/DA3NESTED-GIANT-LARGE"
     device: str = "cuda"
     process_res: int = 504
-    # Frames per inference call. DA3 reasons jointly over everything it's given in one call, so
-    # a chunk's poses/depths are only consistent with each other, not across chunks — fine for
-    # short sequences (one chunk) or per-chunk viewing; for long sequences that need one globally
-    # consistent trajectory, use DA3-Streaming instead (not wired up here).
-    chunk_size: int = 32
     use_known_poses: bool = False   # feed gt cam params as conditioning instead of predicting them
     use_ray_pose: bool = False
     ref_view_strategy: str = "saddle_balanced"
@@ -71,14 +66,14 @@ def _w2c_to_c2w(w2c: np.ndarray) -> np.ndarray:
     return np.linalg.inv(w2c)
 
 
-def _align_chunk_to_gt_frame0(c2ws: np.ndarray, gt_c2w0: np.ndarray) -> np.ndarray:
+def _align_to_gt_frame0(c2ws: np.ndarray, gt_c2w0: np.ndarray) -> np.ndarray:
     """DA3 reasons in its own arbitrary world gauge when it isn't conditioned on known poses
     (world frame anchored to whichever frame `ref_view_strategy` picked as reference, at an
     unrecoverable scale) -- so raw predicted poses land nowhere near the gt trajectory even
-    though the *shape* of the trajectory is right. Rigidly rotate+translate the whole chunk so
-    its first frame's pose exactly matches the known gt pose for that frame; this only fixes
-    position/orientation (6 of the 7 similarity-transform DOF) -- one frame can't disambiguate
-    DA3's scale too, so depth/translations are left at DA3's own scale."""
+    though the *shape* of the trajectory is right. Rigidly rotate+translate every pose by the
+    relative transform between the gt and predicted pose of frame 0, so frame 0 lands exactly on
+    its gt pose; this only fixes position/orientation (6 of the 7 similarity-transform DOF) --
+    one frame can't disambiguate DA3's scale too, so depth/translations stay at DA3's own scale."""
     align = gt_c2w0 @ np.linalg.inv(c2ws[0])
     return align @ c2ws
 
@@ -100,7 +95,11 @@ def _subsample(pts: np.ndarray, cols: np.ndarray, max_points: int | None):
     return pts[idx], cols[idx]
 
 
-def run_chunk(model: DepthAnything3, frames: list[Frame], cfg: ModelConfig) -> Prediction:
+def run_inference(model: DepthAnything3, frames: list[Frame], cfg: ModelConfig) -> Prediction:
+    """One call over the whole sequence -- DA3 reasons jointly over everything it's given, which
+    is the only way its poses/depths come out mutually consistent. Long sequences will simply run
+    out of GPU memory; there is no chunking fallback, because per-chunk predictions live in
+    unrelated world gauges and scales."""
     ext = ints = None
     if cfg.use_known_poses:
         ext, ints = _known_pose_arrays(frames)
@@ -133,32 +132,30 @@ def main():
     model = DepthAnything3.from_pretrained(cfg.model.hf_repo).to(cfg.model.device)
     model.device = cfg.model.device
 
-    chunks = [frames[i:i + cfg.model.chunk_size] for i in range(0, len(frames), cfg.model.chunk_size)]
-    print(f"{len(frames)} frames in {len(chunks)} chunk(s) of up to {cfg.model.chunk_size}")
+    print(f"running {len(frames)} frames in a single inference call")
+    pred = run_inference(model, frames, cfg.model)
+    proc_width = pred.processed_images.shape[2]
+    c2ws = np.stack([_w2c_to_c2w(pred.extrinsics[j]) for j in range(len(frames))])
+    c2ws = _align_to_gt_frame0(c2ws, frames[0].camera().c2w)  # one rigid transform for the whole run
 
     cloud_pts, cloud_cols = [], []
-    for chunk in chunks:
-        pred = run_chunk(model, chunk, cfg.model)
-        proc_width = pred.processed_images.shape[2]
-        c2ws = np.stack([_w2c_to_c2w(pred.extrinsics[j]) for j in range(len(chunk))])
-        c2ws = _align_chunk_to_gt_frame0(c2ws, chunk[0].camera().c2w)
-        for j, f in enumerate(chunk):
-            width, height = image_size(f.rgb_path)
-            depth = cv2.resize(pred.depth[j], (width, height), interpolation=cv2.INTER_LINEAR)
-            if cfg.output.min_confidence is not None:
-                if pred.conf is None:
-                    raise SystemExit("output.min_confidence set but the model produced no confidence map")
-                conf = cv2.resize(pred.conf[j], (width, height), interpolation=cv2.INTER_LINEAR)
-                depth = np.where(conf >= cfg.output.min_confidence, depth, np.nan).astype(np.float32)
-            stem = frame_stem(f.index)
-            write_depth(depth_dir / f"{stem}.exr", depth)
-            write_cam(cam_dir / f"{stem}.json", c2ws[j], pred.intrinsics[j], width=proc_width)
-            if cfg.output.cloud:
-                cam = _written_camera(c2ws[j], pred.intrinsics[j], proc_width, width, height)
-                pts, cols = cam.unproject(depth, rgb=f.rgb(), stride=cfg.output.cloud_stride)
-                cloud_pts.append(pts)
-                cloud_cols.append(cols)
-        print(f"  wrote frames {chunk[0].index}..{chunk[-1].index}")
+    for j, f in enumerate(frames):
+        width, height = image_size(f.rgb_path)
+        depth = cv2.resize(pred.depth[j], (width, height), interpolation=cv2.INTER_LINEAR)
+        if cfg.output.min_confidence is not None:
+            if pred.conf is None:
+                raise SystemExit("output.min_confidence set but the model produced no confidence map")
+            conf = cv2.resize(pred.conf[j], (width, height), interpolation=cv2.INTER_LINEAR)
+            depth = np.where(conf >= cfg.output.min_confidence, depth, np.nan).astype(np.float32)
+        stem = frame_stem(f.index)
+        write_depth(depth_dir / f"{stem}.exr", depth)
+        write_cam(cam_dir / f"{stem}.json", c2ws[j], pred.intrinsics[j], width=proc_width)
+        if cfg.output.cloud:
+            cam = _written_camera(c2ws[j], pred.intrinsics[j], proc_width, width, height)
+            pts, cols = cam.unproject(depth, rgb=f.rgb(), stride=cfg.output.cloud_stride)
+            cloud_pts.append(pts)
+            cloud_cols.append(cols)
+    print(f"  wrote frames {frames[0].index}..{frames[-1].index}")
 
     if cfg.output.cloud:
         pts, cols = _subsample(np.concatenate(cloud_pts), np.concatenate(cloud_cols),
