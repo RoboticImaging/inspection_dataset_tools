@@ -6,6 +6,7 @@ import cv2
 import numpy as np
 import OpenEXR
 import pytest
+import trimesh
 
 from inspection_viz import Layout
 from inspection_viz.config import fill_template
@@ -22,6 +23,14 @@ def write_depth_exr(path: Path, value=5.0, wh=WH):
     d = np.full((wh[1], wh[0]), value, np.float32)
     OpenEXR.File({"compression": OpenEXR.ZIP_COMPRESSION, "type": OpenEXR.scanlineimage},
                  {"Z": d}).write(str(path))
+
+
+def write_cloud_ply(path: Path, n=64):
+    """A small colored world-space point cloud, as a baseline's fused .ply."""
+    rng = np.random.default_rng(0)
+    cloud = trimesh.PointCloud(rng.normal(size=(n, 3)).astype(np.float32),
+                               colors=rng.integers(0, 255, (n, 3), dtype=np.uint8))
+    path.write_bytes(cloud.export(file_type="ply"))
 
 
 def write_cam(path: Path, loc=(0.0, 0.0, 5.0), rot=(1.0, 0.0, 0.0, 0.0)):
@@ -77,7 +86,7 @@ def make_predictions(root: Path, layout: Layout, method: str, binds: dict,
     if cloud:
         ply = root / fill_template(layout.pred_cloud_file, **kw)
         ply.parent.mkdir(parents=True, exist_ok=True)
-        ply.write_bytes(b"ply\n")
+        write_cloud_ply(ply)
 
 
 @pytest.fixture

@@ -24,7 +24,12 @@ browser; the result is cached in `~/.cache/inspection_viz/`, so only the first l
 
 The **Source** dropdown switches the depth/cam data driving the point cloud and depth panel
 between `gt` and any baseline that has written predictions for the loaded asset (see
-Baselines below) — rgb is always ground truth either way.
+Baselines below) — rgb is always ground truth either way. If the selected baseline also
+wrote a fused cloud for the variant (`predictions/<method>/<illumination>/clouds/<variant>.ply`),
+"Point cloud" shows that file — the model's own fusion — instead of unprojecting its
+per-frame depth maps; being one cloud for the whole sequence, it ignores the frame slider
+and Accumulate. The status line says `fused cloud` when one is in play, and the Point stride
+slider thins it. Baselines that wrote no `.ply` fall back to per-frame unprojection.
 
 ## Baselines
 

@@ -6,6 +6,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import OpenEXR
+import trimesh
 from PIL import Image
 
 
@@ -40,6 +41,16 @@ DEPTH_READERS = {".exr": _read_exr, ".png": _read_depth_img, ".tiff": _read_dept
 
 def read_depth(path: Path) -> np.ndarray:
     return DEPTH_READERS[path.suffix.lower()](path)
+
+
+def read_cloud(path: Path) -> tuple[np.ndarray, np.ndarray | None]:
+    """A point cloud file (.ply): (N,3) float32 xyz, plus (N,3) uint8 rgb or None if uncolored."""
+    cloud = trimesh.load(path, process=False)
+    pts = np.asarray(cloud.vertices, dtype=np.float32)
+    colors = np.asarray(getattr(cloud.visual, "vertex_colors", ()))  # (N,4) rgba, or empty
+    if colors.ndim != 2 or len(colors) != len(pts):
+        return pts, None
+    return pts, colors[:, :3].astype(np.uint8)
 
 
 def read_cam(path: Path) -> dict:
