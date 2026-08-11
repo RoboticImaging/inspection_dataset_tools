@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 from inspection_viz import AssetDataset, Layout, Variant
-from tests.conftest import make_asset
+from tests.conftest import make_asset, make_predictions
 
 GLASS_HOUSE = Path("/home/ngoncharov/repos/inspection_datset_visualizer/glass_house")
 V = Variant("trajA", "sunny", "low")
@@ -139,6 +139,50 @@ def test_depth_scale(tmp_path):
     layout = Layout(depth_scale=0.01)
     ds = AssetDataset(make_asset(tmp_path / "a"), layout=layout)
     assert np.allclose(ds.sequence(V)[0].depth(), 0.05)
+
+
+def test_no_methods_without_predictions(asset):
+    ds = AssetDataset(asset)
+    assert ds.methods == []
+    with pytest.raises(KeyError):
+        ds.sequence(V, source="da3")
+
+
+def test_predictions_discovered_and_selectable(tmp_path):
+    layout = Layout()
+    root = make_asset(tmp_path / "a", layout=layout)
+    make_predictions(root, layout, "da3", V.as_dict(), cloud=True)
+    ds = AssetDataset(root, layout=layout)
+    assert ds.methods == ["da3"]
+
+    seq = ds.sequence(V, source="da3")
+    assert len(seq) == 3
+    for f in seq:
+        assert f.rgb().shape == (6, 8, 3)   # rgb still comes from gt
+        assert f.depth() is not None
+        assert f.camera() is not None
+    assert ds.cloud_path(V, "da3") == root / "predictions/da3/sunny/clouds/soil=low,traj=trajA.ply"
+
+    # a variant with no gt data still 404s the same way regardless of source
+    with pytest.raises(KeyError):
+        ds.sequence(Variant("nope"), source="da3")
+    # predictions are keyed by the *full* variant (unlike gt depth, which is keyed by traj alone):
+    # a baseline infers depth from rgb, so another illumination/soil is a different prediction and
+    # must not be served from -- or clobbered by -- this one.
+    with pytest.raises(KeyError):
+        ds.sequence(Variant("trajA", "night", "low"), source="da3")
+    assert ds.cloud_path(Variant("trajA", "night", "low"), "da3") is None
+    # ...as does an unknown method name
+    with pytest.raises(KeyError):
+        ds.sequence(V, source="nope")
+
+
+def test_predictions_dont_leak_into_gt(tmp_path):
+    layout = Layout()
+    root = make_asset(tmp_path / "a", layout=layout)
+    make_predictions(root, layout, "da3", V.as_dict())
+    ds = AssetDataset(root, layout=layout)
+    assert len(ds.sequence(V)) == 3  # gt sequence unaffected by predictions/ existing
 
 
 @pytest.mark.skipif(not GLASS_HOUSE.is_dir(), reason="real dataset not available")

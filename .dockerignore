@@ -1,0 +1,10 @@
+# Keeps the docker build context (repo root) small and free of the host venv — baseline
+# containers never touch it, per baselines/README.md.
+venv/
+.git/
+**/__pycache__/
+.cache/
+*.pyc
+.cache/*
+.cache
+.cache/huggingface

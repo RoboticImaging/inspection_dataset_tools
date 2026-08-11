@@ -7,6 +7,7 @@ import numpy as np
 import viser
 
 from .dataset import AssetDataset, Variant
+from .io import read_cloud
 from .mesh import load_mesh_for_vis
 
 FRUSTUM_IMG_W = 160
@@ -39,6 +40,10 @@ class Viewer:
         self._frustums = {}   # frame idx -> handle
         self._clouds = {}     # frame idx -> handle | None
         self._meshes = {}     # mesh kind -> handle | None (None = bake in flight)
+        self._cloud_file = None    # fused .ply of the current variant+source, if the baseline wrote one
+        self._fused = None         # its handle (see _ensure_fused)
+        self._fused_pts = None     # its parsed (points, colors), kept across stride changes
+        self._fused_pending = None  # path of an in-flight fused-cloud read
         self._panel_cache = {}  # frame idx -> (small rgb, small depth vis)
         self._depth_range = None
         self._lock = threading.RLock()
@@ -71,6 +76,7 @@ class Viewer:
             # picks which one is in play, and one dropdown supplies its value.
             self._axis = g.add_button_group("Vary", ("soil",))
             self._axis_value = g.add_dropdown("Soil", ["-"])
+            self._source = g.add_dropdown("Source", ["gt"])
         with g.add_folder("View"):
             self._mode = g.add_dropdown("Mode", ("Timeline", "All frames"))
             self._frame = g.add_slider("Frame", min=0, max=1, step=1, initial_value=0)
@@ -92,11 +98,13 @@ class Viewer:
             h.on_update(lambda _: self._suspend or self._on_axis_change())
         self._axis.on_click(lambda _: self._suspend or self._on_axis_change())
         self._axis_value.on_update(lambda _: self._suspend or self._load_sequence())
+        self._source.on_update(lambda _: self._suspend or self._load_sequence())
         for h in (self._mode, self._show_frustums, self._geometry, self._frame_step, self._accumulate):
             h.on_update(lambda _: self._suspend or self._refresh())
         self._frame.on_update(lambda _: self._refresh())
         self._stride.on_update(lambda _: self._reset_clouds())
-        self._point_size.on_update(lambda _: self._apply(self._clouds, "point_size", self._point_size.value))
+        self._point_size.on_update(
+            lambda _: self._apply({**self._clouds, "fused": self._fused}, "point_size", self._point_size.value))
         self._frustum_scale.on_update(lambda _: self._apply(self._frustums, "scale", self._frustum_scale.value))
 
     def _variant(self) -> Variant:
@@ -159,6 +167,9 @@ class Viewer:
                 self._traj.options = ds.trajectories or ["-"]
                 self._illum.options = ds.illuminations or ["-"]
                 self._sync_axes()
+                src = self._source.value
+                self._source.options = ("gt", *ds.methods)
+                self._source.value = src if src in self._source.options else "gt"
                 geo = self._geometry.value
                 self._geometry.options = ("None", "Point cloud", *(f"mesh: {k}" for k in ds.meshes))
                 self._geometry.value = geo if geo in self._geometry.options else "Point cloud"
@@ -169,7 +180,7 @@ class Viewer:
                 self._frame_client(client)
 
     def _clear_scene(self, meshes: bool = False):
-        handles = [*self._frustums.values(), *self._clouds.values()]
+        handles = [*self._frustums.values(), *self._clouds.values(), self._fused]
         if meshes:
             handles += list(self._meshes.values())
             self._meshes = {}
@@ -177,6 +188,7 @@ class Viewer:
             if h is not None:
                 h.remove()
         self._frustums, self._clouds, self._panel_cache = {}, {}, {}
+        self._cloud_file = self._fused = self._fused_pts = None  # an in-flight read owns _fused_pending
         self._depth_range = None
 
     def _load_sequence(self):
@@ -186,25 +198,31 @@ class Viewer:
                 self.seq = None
                 self._status.content = "no asset loaded — enter a path above"
                 return
-            v = self._variant()
-            self.seq = self.ds.sequence(v) if self.ds.has(v) else None
+            v, source = self._variant(), self._source.value
+            try:
+                self.seq = self.ds.sequence(v, source) if self.ds.has(v) else None
+            except KeyError:
+                self.seq = None
             n = len(self.seq) if self.seq else 0
             self._frame.max = max(1, n - 1)
             self._frame.value = min(self._frame.value, max(0, n - 1))
             if not self.seq:
-                self._status.content = f"no data for {v.as_dict()}"
+                self._status.content = f"no data for {v.as_dict()} (source={source})"
                 return
             n_depth = sum(f.depth_path is not None for f in self.seq)
             n_cam = sum(f.cam_path is not None for f in self.seq)
+            self._cloud_file = self.ds.cloud_path(v, source) if source != "gt" else None
             self._counts = f"{n} frames · depth {n_depth}/{n} · cams {n_cam}/{n}"
+            if self._cloud_file is not None:
+                self._counts += " · fused cloud"
             self._refresh()
 
     def _reset_clouds(self):
         with self._lock:
-            for h in self._clouds.values():
+            for h in (*self._clouds.values(), self._fused):
                 if h is not None:
                     h.remove()
-            self._clouds = {}
+            self._clouds, self._fused = {}, None
             self._refresh()
 
     def _refresh(self):
@@ -216,6 +234,14 @@ class Viewer:
             cur = min(self._frame.value, n - 1)
             all_mode = self._mode.value == "All frames"
             show_clouds = self._geometry.value == "Point cloud"
+            # A baseline that fused its own cloud gets shown as that cloud; only fall back to
+            # unprojecting its per-frame depth maps when it didn't write one (gt never does).
+            fused = show_clouds and self._cloud_file is not None
+            per_frame = show_clouds and not fused
+            if fused:
+                self._ensure_fused()
+            if self._fused is not None:
+                self._fused.visible = fused
             mesh_kind = self._geometry.value.removeprefix("mesh: ") if self._geometry.value.startswith("mesh: ") else None
             if mesh_kind:
                 self._ensure_mesh(mesh_kind)
@@ -226,21 +252,26 @@ class Viewer:
             for i in sorted(targets):
                 if self._show_frustums.value:
                     self._ensure_frustum(i)
-                if show_clouds:
+                if per_frame:
                     self._ensure_cloud(i)
-            keep = targets | (set(self._clouds) if not all_mode and self._accumulate.value else set())
+            # nothing to keep once the fused cloud is on screen: these are its inputs, redundant
+            keep = set() if fused else \
+                targets | (set(self._clouds) if not all_mode and self._accumulate.value else set())
             for i, h in self._frustums.items():
                 h.visible = self._show_frustums.value and i in targets
             for i, h in self._clouds.items():
                 if h is not None:
-                    h.visible = show_clouds and i in keep
+                    h.visible = per_frame and i in keep
             # prune only after the new content is live, so playback never blinks
             for i in [k for k in self._clouds if k not in keep]:
                 h = self._clouds.pop(i)
                 if h is not None:
                     h.remove()
             self._update_panel(cur)
-            n_pts = sum(h.points.shape[0] for h in self._clouds.values() if h is not None)
+            live = [h for h in self._clouds.values() if h is not None and h.visible]
+            if fused and self._fused is not None:
+                live.append(self._fused)
+            n_pts = sum(h.points.shape[0] for h in live)
             self._status.content = f"{self._counts} · {n_pts:,} pts"
 
     def _ensure_frustum(self, i: int):
@@ -267,6 +298,52 @@ class Viewer:
         self._clouds[i] = self.server.scene.add_point_cloud(
             f"/clouds/{i:04d}", points=pts.astype(np.float32),
             colors=colors if colors is not None else np.full_like(pts, 180, dtype=np.uint8),
+            point_size=self._point_size.value, point_shape="rounded", visible=False,
+        )
+
+    def _ensure_fused(self):
+        """Bring up the fused .ply the current baseline wrote for this variant.
+
+        It is one world-space cloud for the whole sequence -- the baseline's own fusion, with
+        whatever confidence filtering and capping it applies -- so unlike the per-frame clouds it
+        ignores the frame slider and Accumulate. Read off-thread: these files run to millions of
+        points, and the read must not block the gui.
+        """
+        path = self._cloud_file
+        if self._fused is not None or self._fused_pending == path:
+            return
+        if self._fused_pts is not None:
+            self._add_fused(*self._fused_pts)  # only the stride changed; reuse the parsed file
+            return
+        self._fused_pending = path
+        self._status.content = f"loading fused cloud {path.name} ..."
+        gen = self._gen
+
+        def work():
+            err = None
+            try:
+                pts, colors = read_cloud(path)
+            except Exception as e:
+                err = e
+            with self._lock:
+                if self._fused_pending == path:
+                    self._fused_pending = None
+                if gen != self._gen or self._cloud_file != path:  # asset/variant moved on; drop it
+                    return
+                if err is not None:
+                    self._status.content = f"cannot read {path.name}: {err}"
+                    return
+                self._fused_pts = (pts, colors)
+                self._refresh()  # takes the cached branch above and adds the handle
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _add_fused(self, pts: np.ndarray, colors: np.ndarray | None):
+        s = self._stride.value ** 2  # per-frame stride thins a 2d grid; square it to thin as much
+        pts = pts[::s]
+        self._fused = self.server.scene.add_point_cloud(
+            "/clouds/fused", points=pts,
+            colors=colors[::s] if colors is not None else np.full_like(pts, 180, dtype=np.uint8),
             point_size=self._point_size.value, point_shape="rounded", visible=False,
         )
 

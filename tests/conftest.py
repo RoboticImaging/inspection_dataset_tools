@@ -6,8 +6,10 @@ import cv2
 import numpy as np
 import OpenEXR
 import pytest
+import trimesh
 
 from inspection_viz import Layout
+from inspection_viz.config import fill_template
 
 WH = (8, 6)
 
@@ -21,6 +23,14 @@ def write_depth_exr(path: Path, value=5.0, wh=WH):
     d = np.full((wh[1], wh[0]), value, np.float32)
     OpenEXR.File({"compression": OpenEXR.ZIP_COMPRESSION, "type": OpenEXR.scanlineimage},
                  {"Z": d}).write(str(path))
+
+
+def write_cloud_ply(path: Path, n=64):
+    """A small colored world-space point cloud, as a baseline's fused .ply."""
+    rng = np.random.default_rng(0)
+    cloud = trimesh.PointCloud(rng.normal(size=(n, 3)).astype(np.float32),
+                               colors=rng.integers(0, 255, (n, 3), dtype=np.uint8))
+    path.write_bytes(cloud.export(file_type="ply"))
 
 
 def write_cam(path: Path, loc=(0.0, 0.0, 5.0), rot=(1.0, 0.0, 0.0, 0.0)):
@@ -43,9 +53,10 @@ def make_asset(root: Path, layout: Layout = Layout(),
     for kind in mesh_kinds:
         (root / layout.mesh_file.format(name=root.name, kind=kind)).write_bytes(b"glTF")
 
+    rgb_template = layout.rgb_dir[0] if isinstance(layout.rgb_dir, tuple) else layout.rgb_dir
     for traj, illum, soil in itertools.product(trajs, illums, soils):
         binds = {"traj": traj, "illumination": illum, "soil": soil}
-        rgb_dir = root / layout.rgb_dir.format(**binds)
+        rgb_dir = root / rgb_template.format(**binds)
         rgb_dir.mkdir(parents=True, exist_ok=True)
         for i in range(n_frames):
             write_rgb(rgb_dir / (stem(i, rgb_pad) + rgb_ext))
@@ -59,6 +70,23 @@ def make_asset(root: Path, layout: Layout = Layout(),
             write_depth_exr(depth_dir / (stem(i, depth_pad) + ".exr"))
             write_cam(cam_dir / (stem(i, cam_pad) + ".json"))
     return root
+
+
+def make_predictions(root: Path, layout: Layout, method: str, binds: dict,
+                     n_frames=3, pad=8, cloud=False):
+    """Write synthetic predictions/{method}/... files for one variant, following the layout."""
+    kw = {"method": method, **binds}
+    depth_dir = root / fill_template(layout.pred_depth_dir, **kw)
+    cam_dir = root / fill_template(layout.pred_cam_dir, **kw)
+    depth_dir.mkdir(parents=True, exist_ok=True)
+    cam_dir.mkdir(parents=True, exist_ok=True)
+    for i in range(n_frames):
+        write_depth_exr(depth_dir / f"{i:0{pad}d}.exr", value=1.0)
+        write_cam(cam_dir / f"{i:0{pad}d}.json")
+    if cloud:
+        ply = root / fill_template(layout.pred_cloud_file, **kw)
+        ply.parent.mkdir(parents=True, exist_ok=True)
+        write_cloud_ply(ply)
 
 
 @pytest.fixture
