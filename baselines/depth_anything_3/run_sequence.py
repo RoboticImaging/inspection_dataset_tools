@@ -16,6 +16,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import trimesh
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root: inspection_viz + baselines.common
 
@@ -23,7 +24,6 @@ from baselines.common.config import DatasetSelection, OutputSpec, load_config
 from baselines.common.writer import (
     cloud_path, frame_stem, output_dirs, write_cam, write_cloud, write_depth,
 )
-from inspection_viz.camera import Camera
 from inspection_viz.dataset import AssetDataset, Frame
 from inspection_viz.io import image_size
 
@@ -66,40 +66,55 @@ def _w2c_to_c2w(w2c: np.ndarray) -> np.ndarray:
     return np.linalg.inv(w2c)
 
 
-def _align_to_gt_frame0(c2ws: np.ndarray, gt_c2w0: np.ndarray) -> np.ndarray:
-    """DA3 reasons in its own arbitrary world gauge when it isn't conditioned on known poses
-    (world frame anchored to whichever frame `ref_view_strategy` picked as reference, at an
-    unrecoverable scale) -- so raw predicted poses land nowhere near the gt trajectory even
-    though the *shape* of the trajectory is right. Rigidly rotate+translate every pose by the
-    relative transform between the gt and predicted pose of frame 0, so frame 0 lands exactly on
-    its gt pose; this only fixes position/orientation (6 of the 7 similarity-transform DOF) --
-    one frame can't disambiguate DA3's scale too, so depth/translations stay at DA3's own scale."""
-    align = gt_c2w0 @ np.linalg.inv(c2ws[0])
-    return align @ c2ws
+def _gt_frame0_alignment(c2ws: np.ndarray, gt_c2w0: np.ndarray) -> np.ndarray:
+    """The (4,4) rigid transform that puts DA3's world gauge onto the gt one, as far as one frame
+    can. DA3 reasons in its own arbitrary gauge when it isn't conditioned on known poses (world
+    frame anchored to whichever frame `ref_view_strategy` picked as reference, at an unrecoverable
+    scale) -- so raw predictions land nowhere near the gt trajectory even though the *shape* of the
+    trajectory is right. This is the relative transform between the gt and predicted pose of frame
+    0, so applying it lands frame 0 exactly on its gt pose; it only fixes position/orientation
+    (6 of the 7 similarity-transform DOF) -- one frame can't disambiguate DA3's scale too, so
+    depth and inter-frame translations stay at DA3's own scale."""
+    return gt_c2w0 @ np.linalg.inv(c2ws[0])
 
 
-def _written_camera(c2w: np.ndarray, K: np.ndarray, proc_width: int, width: int, height: int) -> Camera:
-    """The camera exactly as `write_cam` stores it and `Camera.from_blender` reads it back --
-    square pixels, centred principal point, intrinsics rescaled from DA3's process_res to the
-    full frame. Building the cloud from *this* rather than DA3's raw K keeps the .ply identical
-    to what the viewer draws from the same files."""
-    fx = float(K[0, 0]) * width / proc_width
-    K_full = np.array([[fx, 0, width / 2], [0, fx, height / 2], [0, 0, 1]])
-    return Camera(K_full, c2w, width, height)
+def _cloud_from_glb(glb_path: Path, align: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Pull xyz+rgb back out of the scene.glb DA3's own exporter wrote, in the gt world frame.
+
+    Asking `inference` for `export_format="glb"` is the one export that runs DA3's real point-cloud
+    post-processing -- adaptive confidence threshold, back-projection at process_res, non-finite
+    filter, random cap -- all at its own defaults, so we don't reimplement any of it. What it
+    writes is a .glb in glTF gauge, though: `export_to_glb` re-centres the scene on the point
+    median and rotates it into the first camera's frame. It stashes that exact 4x4 in the scene
+    metadata as `hf_alignment`, and trimesh round-trips it through glTF extras losslessly, so
+    undoing it recovers DA3's own world gauge; `align` then moves the cloud onto the gt one,
+    exactly as it moved the poses. Camera wireframes ride along in the same file as Path3D
+    geometry and are skipped here.
+    """
+    scene = trimesh.load(glb_path, force="scene")
+    to_world = align @ np.linalg.inv(np.asarray(scene.metadata["hf_alignment"], dtype=np.float64))
+    pts, cols = [], []
+    for name, geom in scene.geometry.items():
+        if not isinstance(geom, trimesh.points.PointCloud):
+            continue
+        node = scene.graph.get(name)[0]  # scene-graph placement, identity in practice
+        pts.append(trimesh.transform_points(geom.vertices, to_world @ node))
+        cols.append(np.asarray(geom.colors)[:, :3])
+    if not pts:
+        raise SystemExit(f"{glb_path} has no point cloud -- did every pixel fail the conf filter?")
+    return np.concatenate(pts), np.concatenate(cols)
 
 
-def _subsample(pts: np.ndarray, cols: np.ndarray, max_points: int | None):
-    if max_points is None or len(pts) <= max_points:
-        return pts, cols
-    idx = np.random.default_rng(0).choice(len(pts), max_points, replace=False)
-    return pts[idx], cols[idx]
-
-
-def run_inference(model: DepthAnything3, frames: list[Frame], cfg: ModelConfig) -> Prediction:
+def run_inference(model: DepthAnything3, frames: list[Frame], cfg: ModelConfig,
+                  export_dir: Path | None) -> Prediction:
     """One call over the whole sequence -- DA3 reasons jointly over everything it's given, which
     is the only way its poses/depths come out mutually consistent. Long sequences will simply run
     out of GPU memory; there is no chunking fallback, because per-chunk predictions live in
-    unrelated world gauges and scales."""
+    unrelated world gauges and scales.
+
+    `export_dir` (set when we want a cloud) also gets DA3's own glb export, every parameter left at
+    its default: scene.glb + the depth_vis jpgs that come with it. `_cloud_from_glb` turns that
+    scene.glb into the .ply the viewer reads."""
     ext = ints = None
     if cfg.use_known_poses:
         ext, ints = _known_pose_arrays(frames)
@@ -108,6 +123,7 @@ def run_inference(model: DepthAnything3, frames: list[Frame], cfg: ModelConfig) 
         extrinsics=ext, intrinsics=ints,
         use_ray_pose=cfg.use_ray_pose, ref_view_strategy=cfg.ref_view_strategy,
         process_res=cfg.process_res,
+        export_dir=None if export_dir is None else str(export_dir), export_format="glb",
     )
 
 
@@ -133,12 +149,13 @@ def main():
     model.device = cfg.model.device
 
     print(f"running {len(frames)} frames in a single inference call")
-    pred = run_inference(model, frames, cfg.model)
+    export_dir = ply_path.parent / f"{ply_path.stem}_da3_export" if cfg.output.cloud else None
+    pred = run_inference(model, frames, cfg.model, export_dir)
     proc_width = pred.processed_images.shape[2]
     c2ws = np.stack([_w2c_to_c2w(pred.extrinsics[j]) for j in range(len(frames))])
-    c2ws = _align_to_gt_frame0(c2ws, frames[0].camera().c2w)  # one rigid transform for the whole run
+    align = _gt_frame0_alignment(c2ws, frames[0].camera().c2w)  # one rigid transform for the run
+    c2ws = align @ c2ws
 
-    cloud_pts, cloud_cols = [], []
     for j, f in enumerate(frames):
         width, height = image_size(f.rgb_path)
         depth = cv2.resize(pred.depth[j], (width, height), interpolation=cv2.INTER_LINEAR)
@@ -150,16 +167,10 @@ def main():
         stem = frame_stem(f.index)
         write_depth(depth_dir / f"{stem}.exr", depth)
         write_cam(cam_dir / f"{stem}.json", c2ws[j], pred.intrinsics[j], width=proc_width)
-        if cfg.output.cloud:
-            cam = _written_camera(c2ws[j], pred.intrinsics[j], proc_width, width, height)
-            pts, cols = cam.unproject(depth, rgb=f.rgb(), stride=cfg.output.cloud_stride)
-            cloud_pts.append(pts)
-            cloud_cols.append(cols)
     print(f"  wrote frames {frames[0].index}..{frames[-1].index}")
 
     if cfg.output.cloud:
-        pts, cols = _subsample(np.concatenate(cloud_pts), np.concatenate(cloud_cols),
-                               cfg.output.cloud_max_points)
+        pts, cols = _cloud_from_glb(export_dir / "scene.glb", align)
         write_cloud(ply_path, pts, cols)
         print(f"  wrote {len(pts):,} points -> {ply_path.relative_to(ds.root)}")
 

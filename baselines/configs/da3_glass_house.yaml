@@ -25,6 +25,4 @@ output:
   method: da3                   # also the viewer's Source label
   overwrite: true
   min_confidence: null          # e.g. 0.5 to mask low-confidence pixels to nan
-  cloud: true                   # fused .ply unprojected from the predicted depth + poses
-  cloud_stride: 4               # pixel stride per depth map
-  cloud_max_points: 5000000     # null = no cap
+  cloud: true                   # fused .ply, converted from DA3's own glb export (its defaults)
