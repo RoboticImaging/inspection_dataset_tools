@@ -1,3 +1,6 @@
 [submodule "depth-anything-3"]
 	path = depth-anything-3
 	url = https://github.com/bytedance-seed/depth-anything-3
+[submodule "Asset-Inspection-3D-Reconstruction-Dataset"]
+	path = Asset-Inspection-3D-Reconstruction-Dataset
+	url = git@github.com:JimLGray/Asset-Inspection-3D-Reconstruction-Dataset.git

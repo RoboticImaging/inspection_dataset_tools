@@ -114,7 +114,8 @@ def run_inference(model: DepthAnything3, frames: list[Frame], cfg: ModelConfig,
 
     `export_dir` (set when we want a cloud) also gets DA3's own glb export, every parameter left at
     its default: scene.glb + the depth_vis jpgs that come with it. `_cloud_from_glb` turns that
-    scene.glb into the .ply the viewer reads."""
+    scene.glb into the .ply the viewer reads, and `main` deletes it right after -- it is a bulky
+    intermediate, and nothing downstream reads it."""
     ext = ints = None
     if cfg.use_known_poses:
         ext, ints = _known_pose_arrays(frames)
@@ -170,8 +171,10 @@ def main():
     print(f"  wrote frames {frames[0].index}..{frames[-1].index}")
 
     if cfg.output.cloud:
-        pts, cols = _cloud_from_glb(export_dir / "scene.glb", align)
+        glb_path = export_dir / "scene.glb"
+        pts, cols = _cloud_from_glb(glb_path, align)
         write_cloud(ply_path, pts, cols)
+        glb_path.unlink()  # scratch: the .ply carries everything the viewer reads
         print(f"  wrote {len(pts):,} points -> {ply_path.relative_to(ds.root)}")
 
     print(f"done: predictions/{cfg.output.method}/ under {ds.root}")
