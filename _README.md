@@ -39,6 +39,19 @@ predictions back into `<asset>/predictions/<method>/...`, in the same file forma
 truth. See [`baselines/README.md`](baselines/README.md) for how to run one and how to add a
 new one. Once predictions exist, they show up in the viewer's Source dropdown automatically.
 
+## Evaluation
+
+```bash
+venv/bin/python eval.py /data/old_house/predictions/da3     # or .../predictions/* for all methods
+```
+
+Scores a method's predictions against ground truth on **every parameter combination** in that
+folder, and prints/writes one results table per metric (pose, depth, point cloud). Predictions
+are first put in the gt gauge by a Sim(3) fitted to the camera centers, since a method that
+estimates its own poses works up to an unknown similarity transform. See
+[`inspection_eval/README.md`](inspection_eval/README.md) for the metric definitions, the
+`--set metric.option=value` knobs, and how to add a metric.
+
 ## When the data folder structure changes
 
 Everything about the layout lives in `inspection_viz/config.py` (`Layout`). Edit the dir
@@ -67,5 +80,6 @@ venv/bin/python -m pytest tests/
 Cover: png/jpg swap, zero-padding changes, stem prefixes, restructured folder trees,
 missing depth/cams, junk files, sparse variant combos, unprojection math, baseline
 prediction discovery/selection, the baseline output writer's round-trip through
-`Camera.from_blender`, and a check of real-data poses against the COLMAP ground truth
+`Camera.from_blender`, the evaluation metrics against predictions whose error is known by
+construction, and a check of real-data poses against the COLMAP ground truth
 (skipped if `glass_house` is absent).

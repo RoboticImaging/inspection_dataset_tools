@@ -161,6 +161,16 @@ class AssetDataset:
         """Baseline prediction sources found under predictions/ (e.g. ["da3"])."""
         return sorted({b["method"] for _, b in self._pred_depth_dirs if "method" in b})
 
+    def prediction_variants(self, method: str) -> list[Variant]:
+        """Variants `method` has predictions for — anything it wrote (depth, cams or a fused
+        cloud) counts, so a partially-written run is still discoverable."""
+        found = {
+            Variant(b.get("traj"), b.get("illumination"), b.get("soil"), b.get("reflectivity"))
+            for entries in (self._pred_depth_dirs, self._pred_cam_dirs, self._pred_clouds)
+            for _, b in entries if b.get("method") == method
+        }
+        return sorted(found, key=str)
+
     def axes(self, traj: str | None, illumination: str | None) -> dict[str, list[str]]:
         """Which of {soil, reflectivity} can be varied for this (traj, illumination), and
         with which values. Soil and reflectivity are never both varied at once, so this is

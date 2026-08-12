@@ -1,0 +1,66 @@
+"""Point-cloud helpers: gt clouds sampled off the gt meshes, and nearest-neighbour distances.
+
+The ground truth for surface metrics is a mesh (`{asset}_{kind}.glb`), so it has to be turned
+into points before it can be compared with a predicted cloud. Sampling is area-weighted and
+seeded, and the result is cached on disk keyed by (mesh, size, mtime, n): the accuracy meshes run
+to hundreds of MB and loading one costs far more than every metric in this repo put together.
+"""
+
+from pathlib import Path
+
+import numpy as np
+import trimesh
+
+CACHE_DIR = Path("~/.cache/inspection_eval").expanduser()
+# glTF is Y-up, the dataset's world (and its cam jsons) is Z-up: +90 deg about x, matching the
+# viewer's GLTF_TO_Z_UP.
+GLTF_TO_Z_UP = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]])
+
+
+def sample_mesh(path: Path, n_points: int, cache_dir: Path = CACHE_DIR,
+                seed: int = 0) -> np.ndarray:
+    """(n_points, 3) world-space points sampled uniformly over the surface of a gt mesh."""
+    st = path.stat()
+    cache = cache_dir / f"{path.stem}-{st.st_size}-{int(st.st_mtime)}-n{n_points}-s{seed}.npy"
+    if cache.is_file():
+        return np.load(cache)
+
+    mesh = trimesh.load(path, force="mesh", process=False)
+    pts, _ = trimesh.sample.sample_surface(mesh, n_points, seed=seed)
+    pts = np.asarray(pts, dtype=np.float32) @ GLTF_TO_Z_UP.T
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    np.save(cache, pts)
+    return pts
+
+
+def nearest_distances(query: np.ndarray, reference: np.ndarray,
+                      chunk: int = 200_000) -> np.ndarray:
+    """Distance from every point of `query` to the closest point of `reference`."""
+    from scipy.spatial import cKDTree
+
+    tree = cKDTree(np.asarray(reference, dtype=np.float64))
+    out = np.empty(len(query), dtype=np.float64)
+    for i in range(0, len(query), chunk):
+        out[i:i + chunk], _ = tree.query(np.asarray(query[i:i + chunk], dtype=np.float64),
+                                         workers=-1)
+    return out
+
+
+def bounds(points: np.ndarray, margin: float = 0.0) -> tuple[np.ndarray, np.ndarray]:
+    """Axis-aligned bounds of `points`, grown by `margin` * the bbox diagonal on every side."""
+    lo, hi = points.min(axis=0), points.max(axis=0)
+    pad = margin * float(np.linalg.norm(hi - lo))
+    return lo - pad, hi + pad
+
+
+def crop(points: np.ndarray, lo, hi) -> np.ndarray:
+    keep = np.all((points >= np.asarray(lo)) & (points <= np.asarray(hi)), axis=1)
+    return points[keep]
+
+
+def subsample(points: np.ndarray, max_points: int | None, seed: int = 0) -> np.ndarray:
+    """Cap a cloud's size by taking a random subset (KD-tree queries scale with both sizes)."""
+    if max_points is None or len(points) <= max_points:
+        return points
+    idx = np.random.default_rng(seed).choice(len(points), max_points, replace=False)
+    return points[np.sort(idx)]
