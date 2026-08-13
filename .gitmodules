@@ -10,3 +10,6 @@
 [submodule "vggt"]
 	path = vggt
 	url = org-16943930@github.com:facebookresearch/vggt.git
+[submodule "Pi3"]
+	path = Pi3
+	url = git@github.com:yyfz/Pi3.git
