@@ -4,3 +4,6 @@
 [submodule "VGGT-SLAM"]
 	path = VGGT-SLAM
 	url = git@github.com:MIT-SPARK/VGGT-SLAM.git
+[submodule "vidmap"]
+	path = vidmap
+	url = git@github.com:cvg/vidmap.git
