@@ -9,6 +9,7 @@ variant. See `inspection_eval/metrics/base.py` for how to add a metric.
 
 import argparse
 import sys
+from datetime import datetime
 from pathlib import Path
 
 from inspection_eval import evaluate, metrics, targets_from_paths
@@ -23,7 +24,10 @@ def parse_args(argv=None):
                    help="one or more <asset>/predictions/<method> folders; an asset root or "
                         "its predictions/ dir stands for every method inside it")
     p.add_argument("--out", type=Path, default=Path("eval_results"),
-                   help="where the tables are written (default: %(default)s)")
+                   help="where the tables are written, in a timestamped subfolder "
+                        "(default: %(default)s/<YYYYmmdd-HHMMSS>)")
+    p.add_argument("--no-timestamp", action="store_true",
+                   help="write straight into --out instead of a timestamped subfolder")
     p.add_argument("--metrics", default=None,
                    help=f"comma-separated subset of: {','.join(metrics.REGISTRY)}")
     p.add_argument("--align", default="sim3", choices=ALIGN_MODES,
@@ -96,7 +100,9 @@ def main(argv=None) -> int:
                   file=sys.stderr)
         return 1
 
-    written = results.write(args.out, [f.strip() for f in args.format.split(",")])
+    out_dir = args.out if args.no_timestamp else \
+        args.out / datetime.now().strftime("%Y%m%d-%H%M%S")
+    written = results.write(out_dir, [f.strip() for f in args.format.split(",")])
     print("\n" + "\n".join(f"wrote {p}" for p in written))
     return 0
 
