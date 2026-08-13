@@ -20,5 +20,5 @@ output:
   # (keyed by the full variant, so runs on different illumination/reflectivity never overwrite each other)
   method: vggt                   # also the viewer's Source label
   overwrite: true
-  min_confidence: 25.0 # Give this as a percentage of points to filter out 
+  min_confidence: 50.0 # Give this as a percentage of points to filter out 
   cloud: true                    # fused .ply, unprojected from predicted depth + poses
