@@ -1,4 +1,4 @@
-# Example config for baselines/depth_anything_3/run_sequence.py.
+# Example config for baselines/vggt-slam/run_sequence.py.
 # Every field has a default in run_sequence.py's Config dataclasses; only override what you need.
 
 dataset:
@@ -30,20 +30,3 @@ output:
   overwrite: true 
   min_confidence: null
   cloud: true 
-
-# model:
-#   hf_repo: depth-anything/DA3NESTED-GIANT-LARGE
-#   device: cuda
-#   process_res: 504
-#   use_known_poses: false        # true = condition on gt cam params instead of predicting them
-#   use_ray_pose: false
-#   ref_view_strategy: saddle_balanced
-
-# output:
-#   # -> predictions/da3/{illumination}/{depths,cam_params}/soil={soil},traj={traj}/
-#   #    predictions/da3/{illumination}/clouds/soil={soil},traj={traj}.ply
-#   # (keyed by the full variant, so runs on different illumination/soil never overwrite each other)
-#   method: da3                   # also the viewer's Source label
-#   overwrite: true
-#   min_confidence: null          # e.g. 0.5 to mask low-confidence pixels to nan
-#   cloud: true                   # fused .ply, converted from DA3's own glb export (its defaults)

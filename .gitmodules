@@ -7,3 +7,6 @@
 [submodule "vidmap"]
 	path = vidmap
 	url = git@github.com:cvg/vidmap.git
+[submodule "vggt"]
+	path = vggt
+	url = org-16943930@github.com:facebookresearch/vggt.git

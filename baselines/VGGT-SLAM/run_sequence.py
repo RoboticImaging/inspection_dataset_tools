@@ -212,14 +212,14 @@ def get_image_and_save_folders(cfg):
     # Either soil or reflectivity (ref) will be in the dataset
     # Here we handle which is present and carry this forward to forming paths
     if 'soil' in cfg['dataset']:
-        assert 'ref' not in cfg['dataset'], "cfg should only contain one of soil or ref"
+        assert 'reflectivity' not in cfg['dataset'], "cfg should only contain one of soil or ref"
         var_key = 'soil'
         var_key_value = cfg['dataset']['soil']
-    elif 'ref' in cfg['dataset']:
+    elif 'reflectivity' in cfg['dataset']:
         var_key = 'ref'
-        var_key_value = cfg['dataset']['ref']
+        var_key_value = cfg['dataset']['reflectivity']
     else:
-        raise KeyError("Either soil or ref needed in config file")
+        raise KeyError("Either soil or reflectivity needed in config file")
 
     image_folder = os.path.join(
             cfg['dataset']['root'], cfg['dataset']['illumination'],
