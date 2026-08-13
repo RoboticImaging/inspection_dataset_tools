@@ -18,7 +18,7 @@ vis:
 
 run:
   min_disparity: 50
-  conf_threshold: 25.0
+  conf_threshold: 50.0
   lc_thres: 0.95
   run_os: False 
   submap_size: 16
@@ -26,7 +26,10 @@ run:
   max_loops: 1 
 
 output:
-  method: vggt-slam 
-  overwrite: true 
-  min_confidence: null
-  cloud: true 
+  # -> predictions/vggt-slam/{illumination}/{depths,cam_params}/soil={soil},traj={traj}/
+  #    predictions/vggt-slam/{illumination}/clouds/soil={soil},traj={traj}.ply
+  # (keyed by the full variant, so runs on different illumination/soil never overwrite each other)
+  method: vggt-slam      # also the viewer's Source label
+  overwrite: true
+  min_confidence: null   # unused here -- point-cloud confidence filtering is run.conf_threshold, applied inside the SLAM backend itself
+  cloud: true             # fused .ply, unprojected from predicted depth + poses
