@@ -337,3 +337,111 @@ def test_table_renders_and_writes(tmp_path):
 
     written = table.write(tmp_path / "out", ("csv", "md", "tex"))
     assert {p.suffix for p in written} == {".csv", ".md", ".tex"}
+
+
+# --- holes in the data --------------------------------------------------------------------
+#
+# Every metric aggregates over data that is allowed to be incomplete, and the failure mode these
+# guard is silent: one nan pixel, one stationary camera pair or one nan vertex in a .ply used to
+# turn a whole row of the results table into "nan" with nothing saying why.
+
+
+def test_stats_reduce_over_the_defined_entries_only():
+    from inspection_eval.metrics import stats
+
+    values = [1.0, np.nan, 3.0, np.inf]
+    assert stats.mean(values) == pytest.approx(2.0)
+    assert stats.median(values) == pytest.approx(2.0)
+    assert stats.rms([3.0, np.nan, 4.0]) == pytest.approx(np.sqrt(12.5))
+    assert stats.fraction_below(values, 2.0) == pytest.approx(0.5)  # 1 of the 2 defined
+
+
+def test_stats_on_nothing_defined_return_the_callers_default():
+    from inspection_eval.metrics import stats
+
+    with np.errstate(all="raise"):  # np.nanmean would warn here; these must not
+        assert np.isnan(stats.mean([np.nan, np.nan]))
+        assert np.isnan(stats.median([]))
+        assert stats.fraction_below([np.nan], 1.0, default=0.0) == 0.0
+
+
+def test_depth_holes_cost_the_valid_ratio_not_the_error(tmp_path):
+    """Half the predicted map is nan and a sixth is a nonsensical zero; the error over what is
+    left must still be the exact answer, and the ratios must show what was missing."""
+    ds = case_asset(tmp_path, depth_gt=5.0, depth_pred=6.0, n_frames=2)
+    pred = np.full((WH[1], WH[0]), 6.0, np.float32)
+    pred[:3] = np.nan  # of 6 rows: 3 nan, 1 zero (unusable: the metrics divide by depth), 2 good
+    pred[3] = 0.0
+    pred_dir = ds.root / fill_template(ds.layout.pred_depth_dir, method="da3", **BINDS)
+    for path in sorted(pred_dir.glob("*.exr")):
+        write_depth_exr(path, value=pred)
+
+    row = get("depth").fn(EvalCase(ds, "da3", VARIANT), DepthOptions())
+
+    assert row["MAE (m)"] == pytest.approx(1.0, rel=1e-3)  # not nan, and not diluted
+    assert row["Relative MAE"] == pytest.approx(0.2, rel=1e-3)
+    assert np.isfinite(row["Scale invariant MSE"])
+    assert row["Valid px ratio (est)"] == pytest.approx(2 / 6)
+    assert row["Valid px ratio (gt)"] == pytest.approx(1.0)
+
+
+def test_depth_median_scaling_survives_a_frame_it_cannot_scale(tmp_path):
+    """An all-nan predicted frame has no median ratio to fit; it must not nan the sequence."""
+    ds = case_asset(tmp_path, depth_gt=5.0, depth_pred=5.0, n_frames=3)
+    pred_dir = ds.root / fill_template(ds.layout.pred_depth_dir, method="da3", **BINDS)
+    write_depth_exr(sorted(pred_dir.glob("*.exr"))[0],
+                    value=np.full((WH[1], WH[0]), np.nan, np.float32))
+
+    row = get("depth").fn(EvalCase(ds, "da3", VARIANT), DepthOptions(scale="median"))
+    assert row["RMSE (m)"] == pytest.approx(0.0, abs=1e-4)
+    assert row["Frames"] == 3 and row["Valid px ratio (est)"] == pytest.approx(2 / 3)
+
+
+def test_pose_metrics_drop_a_pair_with_no_baseline_rather_than_failing_it(tmp_path):
+    """Two frames at the same place have no relative translation direction. Scoring that pair as
+    a miss would punish a method for a stationary stretch it reproduced perfectly."""
+    ds = case_asset(tmp_path, n_frames=4)
+    for template in (ds.layout.cam_dir, ds.layout.pred_cam_dir):  # in both trajectories
+        cam_dir = ds.root / fill_template(template, method="da3", **BINDS)
+        write_cam(cam_dir / "00000001.json", loc=(0.0, 0.0, 5.0))  # same place as frame 0
+
+    row = get("pose").fn(EvalCase(ds, "da3", VARIANT, align_mode="none"), PoseOptions())
+
+    assert row["Cam pairs"] == 3 and row["Undefined pairs"] == 1
+    assert row["RTA@5 %"] == pytest.approx(100.0)  # the 2 scorable pairs, both exact
+    assert row["RRA@5 %"] == pytest.approx(100.0)
+    assert np.isfinite(row["AUC@30"]) and row["ATE RMSE (m)"] == pytest.approx(0.0, abs=1e-6)
+
+
+def test_a_camera_with_a_nan_pose_is_dropped_like_a_missing_one(tmp_path):
+    ds = case_asset(tmp_path, n_frames=4)
+    pred_cam_dir = ds.root / fill_template(ds.layout.pred_cam_dir, method="da3", **BINDS)
+    write_cam(pred_cam_dir / "00000002.json", loc=(float("nan"), 0.0, 5.0))
+
+    case = EvalCase(ds, "da3", VARIANT)
+    assert 2 not in case.raw_pred_cams and case.cam_frames == [0, 1, 3]
+
+    row = get("pose").fn(case, PoseOptions())
+    assert row["Frames"] == 3
+    assert np.isfinite(row["Align scale"]) and np.isfinite(row["ATE RMSE (m)"])
+
+
+def test_cloud_metrics_ignore_nan_vertices_in_a_fused_ply(tmp_path):
+    """A nan vertex poisons a KD-tree query; it has to go before any distance is taken."""
+    ds = case_asset(tmp_path, n_frames=3, cloud=True)
+    write_gt_mesh(ds.root, "accuracy")
+    ds = AssetDataset(ds.root, ds.layout)
+
+    rng = np.random.default_rng(0)
+    pts = np.column_stack([rng.uniform(-0.5, 3.5, 300), rng.uniform(-2, 2, 300),
+                           np.full(300, 0.05)]).astype(np.float32)
+    pts[::10] = np.nan  # 30 of the 300 are unusable
+    ds.cloud_path(VARIANT, "da3").write_bytes(
+        trimesh.PointCloud(pts).export(file_type="ply"))
+
+    row = get("cloud").fn(EvalCase(ds, "da3", VARIANT, "none", tmp_path / "cache"),
+                          CloudOptions(gt_points=20_000, thresholds=(0.1,)))
+
+    assert row["Pred points"] == 270
+    assert np.isfinite(row["Accuracy (m)"]) and row["Accuracy (m)"] < 0.05
+    assert row["Precision @0.1m"] == pytest.approx(1.0)

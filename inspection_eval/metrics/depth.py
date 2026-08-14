@@ -25,6 +25,7 @@ import numpy as np
 
 from ..case import CAP_DEPTH, EvalCase
 from .base import register
+from .stats import positive_depth
 
 
 @dataclass
@@ -47,8 +48,11 @@ def depth_metrics(case: EvalCase, o: DepthOptions) -> dict:
         gt, pred = case.depth_pair(index)
         pred = pred * _frame_scale(case, o, gt, pred)
 
-        valid_gt = np.isfinite(gt)
-        valid_est = np.isfinite(pred)
+        # `depth_pair` already hands over nan for everything unusable, but this metric applies a
+        # scale of its own afterwards and is the thing that divides by depth and logs it, so it
+        # re-checks rather than trusting that.
+        valid_gt = positive_depth(gt)
+        valid_est = positive_depth(pred)
         valid = valid_gt & valid_est
 
         n_px += gt.size
@@ -101,7 +105,14 @@ def _select(frames: list, max_frames: int | None) -> list:
 def _sequence_scale(case: EvalCase, o: DepthOptions) -> float:
     """The one scale applied to every frame, or nan when it is fitted per frame."""
     if o.scale == "align":
-        return float(case.transform.scale)
+        scale = float(case.transform.scale)
+        # A degenerate gauge fit (collinear or coincident camera centers) would multiply every
+        # depth map by nan or flip its sign; every number below would then be nan or nonsense,
+        # so the metric fails loudly here instead of reporting them.
+        if not np.isfinite(scale) or scale <= 0:
+            raise ValueError(f"the gauge alignment gave an unusable depth scale ({scale}); "
+                             "use scale=median or scale=none for this case")
+        return scale
     if o.scale == "none":
         return 1.0
     if o.scale == "median":
@@ -112,5 +123,10 @@ def _sequence_scale(case: EvalCase, o: DepthOptions) -> float:
 def _frame_scale(case: EvalCase, o: DepthOptions, gt: np.ndarray, pred: np.ndarray) -> float:
     if o.scale != "median":
         return _sequence_scale(case, o)
-    valid = np.isfinite(gt) & np.isfinite(pred)
-    return float(np.median(gt[valid] / pred[valid])) if np.any(valid) else 1.0
+    valid = positive_depth(gt) & positive_depth(pred)
+    if not np.any(valid):
+        return 1.0
+    scale = float(np.median(gt[valid] / pred[valid]))
+    # One unusable frame should cost that frame, not the sequence: leaving it at 1.0 keeps it in
+    # the aggregate as the (large) error it is, rather than nan-ing every pixel of it.
+    return scale if np.isfinite(scale) and scale > 0 else 1.0

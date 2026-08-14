@@ -20,7 +20,8 @@ def write_rgb(path: Path, wh=WH):
 
 
 def write_depth_exr(path: Path, value=5.0, wh=WH):
-    d = np.full((wh[1], wh[0]), value, np.float32)
+    """`value` is a constant depth, or a (h, w) map when a test needs holes in it."""
+    d = np.ascontiguousarray(np.broadcast_to(np.asarray(value, np.float32), (wh[1], wh[0])))
     OpenEXR.File({"compression": OpenEXR.ZIP_COMPRESSION, "type": OpenEXR.scanlineimage},
                  {"Z": d}).write(str(path))
 
