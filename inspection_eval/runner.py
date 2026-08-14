@@ -35,6 +35,20 @@ class Skip:
 
 
 @dataclass
+class FrameGap:
+    """An rgb frame of `source` that has no matching depth or cam file, in a variant that
+    otherwise has that field. `EvalCase` already tolerates this — it just drops the frame from
+    whichever of `depth_frames`/`cam_frames` needed it — so a gap is not fatal by itself, only
+    worth surfacing before a run silently scores less than the whole sequence."""
+
+    dataset: AssetDataset
+    source: str  # "gt", or a method name
+    variant: Variant
+    field: str  # "depth" or "cam"
+    indices: list  # list[int], the rgb frames missing that field
+
+
+@dataclass
 class Results:
     tables: dict  # metric name -> Table
     skips: list  # list[Skip]
@@ -84,6 +98,35 @@ def variants(target: Target, **filters) -> list[Variant]:
     for field, wanted in filters.items():
         if wanted is not None:
             out = [v for v in out if getattr(v, field) == wanted]
+    return out
+
+
+def frame_gaps(targets, filters: dict = None) -> list[FrameGap]:
+    """Every rgb frame across `targets` that is missing depth or cam data it ought to have.
+
+    "Ought to have" means: some other frame of that same (source, variant) does have the field,
+    so the field is one the source provides, and this frame is a hole in it rather than data the
+    source never captures at all — an asset with no gt depth is normal, an asset missing frame
+    x's depth is a gap. gt is checked once per (asset, variant) even though it is shared by every
+    method's Target, so a gap in it is not reported once per method.
+    """
+    out = []
+    seen_gt = set()
+    for target in targets:
+        for variant in variants(target, **(filters or {})):
+            sources = [(target.method, target.dataset.sequence(variant, target.method))]
+            gt_key = (target.dataset.root, variant)
+            if gt_key not in seen_gt:
+                seen_gt.add(gt_key)
+                sources.append(("gt", target.dataset.sequence(variant, "gt")))
+            for source, seq in sources:
+                for field, path_of in (("depth", lambda f: f.depth_path),
+                                       ("cam", lambda f: f.cam_path)):
+                    if not any(path_of(f) is not None for f in seq):
+                        continue  # this source doesn't provide the field at all; not a gap
+                    missing = [f.index for f in seq if path_of(f) is None]
+                    if missing:
+                        out.append(FrameGap(target.dataset, source, variant, field, missing))
     return out
 
 

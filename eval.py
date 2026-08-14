@@ -12,7 +12,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from inspection_eval import evaluate, metrics, targets_from_paths
+from inspection_eval import evaluate, frame_gaps, metrics, targets_from_paths
 from inspection_eval.case import ALIGN_MODES
 from inspection_eval.report import FORMATS
 
@@ -30,6 +30,11 @@ def parse_args(argv=None):
                    help="write straight into --out instead of a timestamped subfolder")
     p.add_argument("--metrics", default=None,
                    help=f"comma-separated subset of: {','.join(metrics.REGISTRY)}")
+    p.add_argument("--allow-missing-frames", action="store_true",
+                   help="don't fail when an rgb frame has no matching depth or pose file; "
+                        "silently score only the frames that are complete instead (metrics "
+                        "already skip a frame that is missing on either side, so this just "
+                        "waives the upfront check)")
     p.add_argument("--align", default="sim3", choices=ALIGN_MODES,
                    help="how predictions are put in the gt gauge, fitted to the camera centers: "
                         "sim3 (default) also solves the unknown scale, se3 assumes the "
@@ -70,6 +75,14 @@ def list_metrics() -> None:
             print(f"    {metric.name}.{field.name} = {getattr(metric.default_options(), field.name)!r}")
 
 
+def describe_gaps(gaps) -> str:
+    lines = [f"  {g.dataset.root.name} / {g.source} / {g.variant}: {g.field} missing for "
+            f"frame(s) {', '.join(map(str, g.indices))}" for g in gaps]
+    return ("some rgb frames have no matching depth or pose file:\n" + "\n".join(lines) +
+           "\n\neither add the missing files, or pass --allow-missing-frames to evaluate only "
+           "the frames that are complete")
+
+
 def main(argv=None) -> int:
     args = parse_args(argv)
     if args.list_metrics:
@@ -82,6 +95,11 @@ def main(argv=None) -> int:
     names = [n.strip() for n in args.metrics.split(",")] if args.metrics else None
     filters = {"traj": args.traj, "illumination": args.illumination,
                "soil": args.soil, "reflectivity": args.reflectivity}
+
+    if not args.allow_missing_frames:
+        gaps = frame_gaps(targets, filters)
+        if gaps:
+            raise SystemExit(describe_gaps(gaps))
 
     def on_event(kind, message):
         if not args.quiet:
