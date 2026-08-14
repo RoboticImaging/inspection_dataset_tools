@@ -9,7 +9,8 @@ import pytest
 import trimesh
 
 from conftest import WH, make_asset, make_predictions, write_cam, write_depth_exr
-from inspection_eval import Sim3, evaluate, target_from_path, targets_from_paths, umeyama
+from inspection_eval import (Sim3, evaluate, frame_gaps, target_from_path, targets_from_paths,
+                             umeyama)
 from inspection_eval.case import EvalCase, match_size
 from inspection_eval.metrics import REGISTRY, get
 from inspection_eval.metrics.cloud import CloudOptions
@@ -445,3 +446,84 @@ def test_cloud_metrics_ignore_nan_vertices_in_a_fused_ply(tmp_path):
     assert row["Pred points"] == 270
     assert np.isfinite(row["Accuracy (m)"]) and row["Accuracy (m)"] < 0.05
     assert row["Precision @0.1m"] == pytest.approx(1.0)
+
+
+# --- missing frames (frame_gaps, and eval.py's --allow-missing-frames) ---------------------
+#
+# EvalCase already tolerates an rgb frame with no matching depth/cam on either side -- it just
+# drops out of `depth_frames`/`cam_frames` -- so the thing under test here is the *preflight*:
+# by default eval.py should refuse to run quietly on an incomplete case, and only proceed once
+# the flag says that is fine.
+
+
+def test_frame_gaps_reports_a_missing_depth_and_cam_file(tmp_path):
+    ds = case_asset(tmp_path, n_frames=4)
+    gt_depth_dir = ds.root / ds.layout.depth_dir.format(**BINDS)
+    (gt_depth_dir / "00000002.exr").unlink()  # frame 2's gt depth just isn't there
+    pred_cam_dir = ds.root / fill_template(ds.layout.pred_cam_dir, method="da3", **BINDS)
+    (pred_cam_dir / "00000001.json").unlink()  # frame 1's predicted pose just isn't there
+
+    gaps = frame_gaps([target_from_path(ds.root / "predictions" / "da3")])
+
+    by_field = {(g.source, g.field): g.indices for g in gaps}
+    assert by_field[("gt", "depth")] == [2]
+    assert by_field[("da3", "cam")] == [1]
+
+
+def test_frame_gaps_is_quiet_on_a_complete_case(tmp_path):
+    ds = case_asset(tmp_path, n_frames=4)
+    assert frame_gaps([target_from_path(ds.root / "predictions" / "da3")]) == []
+
+
+def test_frame_gaps_does_not_flag_a_field_a_source_never_had(tmp_path):
+    # a method that predicted no depth at all for a variant isn't "missing" it frame by frame --
+    # that would be indistinguishable from every real gap, so it must not be reported as one.
+    ds = case_asset(tmp_path, n_frames=4)
+    pred_depth_dir = ds.root / fill_template(ds.layout.pred_depth_dir, method="da3", **BINDS)
+    for f in pred_depth_dir.glob("*.exr"):
+        f.unlink()
+
+    gaps = frame_gaps([target_from_path(ds.root / "predictions" / "da3")])
+    assert not any(g.source == "da3" and g.field == "depth" for g in gaps)
+
+
+def test_frame_gaps_checks_gt_once_across_methods_that_share_it(tmp_path):
+    ds = case_asset(tmp_path, n_frames=4)
+    make_predictions(ds.root, ds.layout, "vggt", BINDS, n_frames=4)
+    (ds.root / ds.layout.depth_dir.format(**BINDS) / "00000002.exr").unlink()
+
+    gaps = frame_gaps(targets_from_paths([ds.root / "predictions"]))
+    assert sum(1 for g in gaps if g.source == "gt") == 1
+
+
+def test_eval_cli_refuses_a_case_with_missing_frames_by_default(tmp_path):
+    import eval as eval_cli
+
+    ds = case_asset(tmp_path, n_frames=4)
+    pred_depth_dir = ds.root / fill_template(ds.layout.pred_depth_dir, method="da3", **BINDS)
+    (pred_depth_dir / "00000003.exr").unlink()
+
+    with pytest.raises(SystemExit) as exc:
+        eval_cli.main([str(ds.root / "predictions" / "da3"), "--out", str(tmp_path / "out")])
+
+    message = str(exc.value)
+    assert "--allow-missing-frames" in message
+    assert "da3" in message and "depth" in message and "3" in message
+    assert not (tmp_path / "out").exists()
+
+
+def test_eval_cli_allow_missing_frames_runs_anyway(tmp_path):
+    import csv
+
+    import eval as eval_cli
+
+    ds = case_asset(tmp_path, n_frames=4)
+    pred_depth_dir = ds.root / fill_template(ds.layout.pred_depth_dir, method="da3", **BINDS)
+    (pred_depth_dir / "00000003.exr").unlink()
+
+    rc = eval_cli.main([str(ds.root / "predictions" / "da3"), "--allow-missing-frames",
+                        "--out", str(tmp_path / "out"), "--no-timestamp", "-q"])
+
+    assert rc == 0
+    rows = list(csv.DictReader((tmp_path / "out" / "depth.csv").open()))
+    assert rows[0]["Frames"] == "3"  # frame 3 dropped, the other 3 still scored

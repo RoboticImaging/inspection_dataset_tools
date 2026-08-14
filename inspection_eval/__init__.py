@@ -16,8 +16,9 @@ from .align import Sim3, umeyama
 from .case import EvalCase
 from .metrics import REGISTRY, Metric, register
 from .report import Table
-from .runner import Results, Target, evaluate, target_from_path, targets_from_paths, variants
+from .runner import (FrameGap, Results, Target, evaluate, frame_gaps, target_from_path,
+                    targets_from_paths, variants)
 
-__all__ = ["EvalCase", "Metric", "REGISTRY", "Results", "Sim3", "Table", "Target",
-           "evaluate", "register", "target_from_path", "targets_from_paths", "umeyama",
-           "variants"]
+__all__ = ["EvalCase", "FrameGap", "Metric", "REGISTRY", "Results", "Sim3", "Table", "Target",
+           "evaluate", "frame_gaps", "register", "target_from_path", "targets_from_paths",
+           "umeyama", "variants"]
