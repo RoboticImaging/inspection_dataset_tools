@@ -24,10 +24,10 @@ def parse_args(argv=None):
                    help="one or more <asset>/predictions/<method> folders; an asset root or "
                         "its predictions/ dir stands for every method inside it")
     p.add_argument("--out", type=Path, default=Path("eval_results"),
-                   help="where the tables are written, in a timestamped subfolder "
-                        "(default: %(default)s/<YYYYmmdd-HHMMSS>)")
+                   help="where the tables are written, in a subfolder named after what was "
+                        "evaluated and when (default: %(default)s/<asset>-<method>-<timestamp>)")
     p.add_argument("--no-timestamp", action="store_true",
-                   help="write straight into --out instead of a timestamped subfolder")
+                   help="write straight into --out instead of a named, timestamped subfolder")
     p.add_argument("--metrics", default=None,
                    help=f"comma-separated subset of: {','.join(metrics.REGISTRY)}")
     p.add_argument("--allow-missing-frames", action="store_true",
@@ -75,6 +75,21 @@ def list_metrics() -> None:
             print(f"    {metric.name}.{field.name} = {getattr(metric.default_options(), field.name)!r}")
 
 
+def run_label(targets) -> str:
+    """A short, readable tag for what `targets` covers, e.g. "old_house-da3" or, for a wildcard
+    run over several methods, "old_house-da3+vggt". Used to name the output folder so that
+    `eval_results/` stays browsable instead of filling up with bare timestamps."""
+    assets = sorted({t.dataset.root.name for t in targets})
+    methods = sorted({t.method for t in targets})
+    return f"{_join(assets, 'assets')}-{_join(methods, 'methods')}"
+
+
+def _join(names: list, plural: str, limit: int = 3) -> str:
+    if len(names) <= limit:
+        return "+".join(names)
+    return f"{len(names)}-{plural}"
+
+
 def describe_gaps(gaps) -> str:
     lines = [f"  {g.dataset.root.name} / {g.source} / {g.variant}: {g.field} missing for "
             f"frame(s) {', '.join(map(str, g.indices))}" for g in gaps]
@@ -119,7 +134,7 @@ def main(argv=None) -> int:
         return 1
 
     out_dir = args.out if args.no_timestamp else \
-        args.out / datetime.now().strftime("%Y%m%d-%H%M%S")
+        args.out / f"{run_label(targets)}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
     written = results.write(out_dir, [f.strip() for f in args.format.split(",")])
     print("\n" + "\n".join(f"wrote {p}" for p in written))
     return 0
