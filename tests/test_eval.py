@@ -527,3 +527,47 @@ def test_eval_cli_allow_missing_frames_runs_anyway(tmp_path):
     assert rc == 0
     rows = list(csv.DictReader((tmp_path / "out" / "depth.csv").open()))
     assert rows[0]["Frames"] == "3"  # frame 3 dropped, the other 3 still scored
+
+
+# --- eval.py's output folder naming ---------------------------------------------------------
+
+
+def test_run_label_names_a_single_asset_and_method(tmp_path):
+    import eval as eval_cli
+
+    ds = case_asset(tmp_path, n_frames=2)
+    targets = targets_from_paths([ds.root / "predictions" / "da3"])
+    assert eval_cli.run_label(targets) == "asset-da3"
+
+
+def test_run_label_lists_every_method_of_a_wildcard_run(tmp_path):
+    import eval as eval_cli
+
+    ds = case_asset(tmp_path, n_frames=2)
+    make_predictions(ds.root, ds.layout, "vggt", BINDS, n_frames=2)
+    targets = targets_from_paths([ds.root / "predictions"])
+    assert eval_cli.run_label(targets) == "asset-da3+vggt"
+
+
+def test_run_label_falls_back_to_a_count_past_the_limit(tmp_path):
+    import eval as eval_cli
+
+    ds = case_asset(tmp_path, n_frames=2)  # already writes method "da3"
+    for method in ("m1", "m2", "m3"):
+        make_predictions(ds.root, ds.layout, method, BINDS, n_frames=2)
+    targets = targets_from_paths([ds.root / "predictions"])
+    assert eval_cli.run_label(targets) == "asset-4-methods"
+
+
+def test_eval_cli_writes_into_a_named_timestamped_subfolder(tmp_path):
+    import eval as eval_cli
+
+    ds = case_asset(tmp_path, n_frames=2)
+    rc = eval_cli.main([str(ds.root / "predictions" / "da3"), "--out", str(tmp_path / "out"),
+                        "-q"])
+    assert rc == 0
+
+    subdirs = list((tmp_path / "out").iterdir())
+    assert len(subdirs) == 1
+    assert subdirs[0].name.startswith("asset-da3-")
+    assert (subdirs[0] / "depth.csv").is_file()
