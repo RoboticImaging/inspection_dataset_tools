@@ -27,6 +27,7 @@ import numpy as np
 
 from .. import geometry
 from ..case import CAP_CLOUD, EvalCase
+from . import stats
 from .base import register
 
 
@@ -69,16 +70,20 @@ def cloud_metrics(case: EvalCase, o: CloudOptions) -> dict:
     d_comp = (geometry.nearest_distances(gt_comp, pred) if not empty
               else np.full(len(gt_comp), np.nan))
 
+    # Distances are reduced over the defined ones only, so a stray point cannot nan out the
+    # headline number; when *none* is defined (the empty case above) the mean stays nan, because
+    # "how far off was it" has no answer, while the thresholded scores below correctly read 0.
+    acc, comp = stats.mean(d_acc), stats.mean(d_comp)
     row = {
-        "Accuracy (m)": float(d_acc.mean()),
-        "Accuracy median (m)": float(np.median(d_acc)),
-        "Completeness (m)": float(d_comp.mean()),
-        "Completeness median (m)": float(np.median(d_comp)),
-        "Chamfer (m)": float(d_acc.mean() + d_comp.mean()) / 2,
+        "Accuracy (m)": acc,
+        "Accuracy median (m)": stats.median(d_acc),
+        "Completeness (m)": comp,
+        "Completeness median (m)": stats.median(d_comp),
+        "Chamfer (m)": (acc + comp) / 2,
     }
     for tau in o.thresholds:
-        precision = float(np.count_nonzero(d_acc < tau) / len(d_acc))
-        recall = float(np.count_nonzero(d_comp < tau) / len(d_comp))
+        precision = stats.fraction_below(d_acc, tau, default=0.0)
+        recall = stats.fraction_below(d_comp, tau, default=0.0)
         f = 2 * precision * recall / (precision + recall) if precision + recall > 0 else 0.0
         row[f"Precision @{tau}m"] = precision
         row[f"Recall @{tau}m"] = recall

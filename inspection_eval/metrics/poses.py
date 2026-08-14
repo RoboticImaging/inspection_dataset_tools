@@ -18,6 +18,7 @@ import numpy as np
 
 from ..align import rotation_angles
 from ..case import CAP_CAMERAS, EvalCase
+from . import stats
 from .base import register
 
 
@@ -47,25 +48,35 @@ def pose_metrics(case: EvalCase, o: PoseOptions) -> dict:
     rra = rotation_angles(_relative(r_gt, i_idx, j_idx), _relative(r_pred, i_idx, j_idx))
     rta = _direction_angles(t_gt[j_idx] - t_gt[i_idx], t_pred[j_idx] - t_pred[i_idx])
 
+    # A pair whose baseline is zero in either trajectory has no relative translation direction,
+    # so its RTA is undefined rather than bad. Such pairs leave the denominator instead of being
+    # scored as failures, which would quietly punish a method for a stationary stretch of the
+    # sequence; `Undefined pairs` says how many were dropped.
+    err = stats.finite(np.maximum(rra, rta))
+    n_scored = int(err.size)
+
     row = {}
     for tau in o.thresholds:
-        row[f"RRA@{tau} %"] = 100.0 * np.count_nonzero(rra < tau) / n_pairs
+        row[f"RRA@{tau} %"] = 100.0 * stats.fraction_below(rra, tau)
     for tau in o.thresholds:
-        row[f"RTA@{tau} %"] = 100.0 * np.count_nonzero(rta < tau) / n_pairs
+        row[f"RTA@{tau} %"] = 100.0 * stats.fraction_below(rta, tau)
 
-    err = np.maximum(rra, rta)
-    hist, _ = np.histogram(err, bins=np.arange(o.auc_max + 1))
-    row[f"AUC@{o.auc_max}"] = float(np.mean(np.cumsum(hist / n_pairs)))
+    if n_scored:
+        hist, _ = np.histogram(err, bins=np.arange(o.auc_max + 1))
+        row[f"AUC@{o.auc_max}"] = float(np.mean(np.cumsum(hist / n_scored)))
+    else:
+        row[f"AUC@{o.auc_max}"] = float("nan")
 
     offsets = np.linalg.norm(t_pred - t_gt, axis=1)
     abs_rot = rotation_angles(r_gt, r_pred)
     row.update({
-        "ATE RMSE (m)": float(np.sqrt(np.mean(offsets**2))),
-        "ATE median (m)": float(np.median(offsets)),
-        "Abs rot err mean (deg)": float(np.mean(abs_rot)),
+        "ATE RMSE (m)": stats.rms(offsets),
+        "ATE median (m)": stats.median(offsets),
+        "Abs rot err mean (deg)": stats.mean(abs_rot),
         "Align scale": float(case.transform.scale),
         "Frames": len(frames),
         "Cam pairs": n_pairs,
+        "Undefined pairs": n_pairs - n_scored,
     })
     return row
 

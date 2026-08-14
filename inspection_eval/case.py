@@ -78,12 +78,12 @@ class EvalCase:
 
     @cached_property
     def gt_cams(self) -> dict[int, Camera]:
-        return {i: c for i, f in self.gt_frames.items() if (c := f.camera()) is not None}
+        return {i: c for i, f in self.gt_frames.items() if _usable_cam(c := f.camera())}
 
     @cached_property
     def raw_pred_cams(self) -> dict[int, Camera]:
         """Predicted cameras as written, i.e. still in the method's own gauge."""
-        return {i: c for i, f in self.pred_frames.items() if (c := f.camera()) is not None}
+        return {i: c for i, f in self.pred_frames.items() if _usable_cam(c := f.camera())}
 
     @cached_property
     def cam_frames(self) -> list[int]:
@@ -157,7 +157,8 @@ class EvalCase:
             if not chunks:
                 raise FileNotFoundError(f"no depth+poses to unproject for {self.method}")
             pts = np.concatenate(chunks)
-        pts = geometry.subsample(pts, max_points)
+        # Filtered before the cap so `max_points` counts usable points, not nan padding.
+        pts = geometry.subsample(geometry.finite(pts), max_points)
         return self.transform.points(pts)
 
     def gt_cloud(self, kind: str, n_points: int = 1_000_000) -> np.ndarray:
@@ -188,6 +189,13 @@ class EvalCase:
 
     def missing(self, needs) -> list[str]:
         return [n for n in needs if n not in self.capabilities]
+
+
+def _usable_cam(cam: Camera | None) -> bool:
+    """A pose with a nan or inf anywhere in it would put nan through the gauge fit and from
+    there into every metric of the case, so the frame is dropped as if it had never been
+    written — the same treatment a missing cam json gets."""
+    return cam is not None and bool(np.all(np.isfinite(cam.c2w)))
 
 
 def _far(cam: Camera | None) -> float | None:

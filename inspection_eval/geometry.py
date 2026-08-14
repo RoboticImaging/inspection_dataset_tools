@@ -27,10 +27,24 @@ def sample_mesh(path: Path, n_points: int, cache_dir: Path = CACHE_DIR,
 
     mesh = trimesh.load(path, force="mesh", process=False)
     pts, _ = trimesh.sample.sample_surface(mesh, n_points, seed=seed)
-    pts = np.asarray(pts, dtype=np.float32) @ GLTF_TO_Z_UP.T
+    pts = finite(np.asarray(pts, dtype=np.float32) @ GLTF_TO_Z_UP.T)
+    if len(pts) == 0:
+        raise ValueError(f"{path} sampled to no finite point")
     cache_dir.mkdir(parents=True, exist_ok=True)
     np.save(cache, pts)
     return pts
+
+
+def finite(points: np.ndarray) -> np.ndarray:
+    """The rows of an (N,3) cloud that are finite in every coordinate.
+
+    A fused .ply is free to carry nan or inf vertices — a KD-tree built over them is not, and a
+    single one of them turns every distance statistic downstream into nan.
+    """
+    pts = np.asarray(points)
+    if pts.size == 0:
+        return pts
+    return pts[np.all(np.isfinite(pts), axis=1)]
 
 
 def nearest_distances(query: np.ndarray, reference: np.ndarray,
@@ -48,6 +62,9 @@ def nearest_distances(query: np.ndarray, reference: np.ndarray,
 
 def bounds(points: np.ndarray, margin: float = 0.0) -> tuple[np.ndarray, np.ndarray]:
     """Axis-aligned bounds of `points`, grown by `margin` * the bbox diagonal on every side."""
+    points = finite(points)
+    if len(points) == 0:
+        raise ValueError("cannot take the bounds of a cloud with no finite point")
     lo, hi = points.min(axis=0), points.max(axis=0)
     pad = margin * float(np.linalg.norm(hi - lo))
     return lo - pad, hi + pad
