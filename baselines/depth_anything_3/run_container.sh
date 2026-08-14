@@ -2,7 +2,8 @@
 # Drop into an interactive shell inside the Depth Anything 3 baseline image. That's all it
 # does — it runs no baseline itself. Once inside:
 #
-#   python run_sequence.py <path_to_config>          # cwd starts at this baseline's folder
+#   python run_sequence.py --data <data config> --model <baseline config>
+#                                                    # cwd starts at this baseline's folder
 #
 # Usage:
 #   baselines/depth_anything_3/run_container.sh          # shell

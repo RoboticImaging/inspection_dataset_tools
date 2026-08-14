@@ -1,15 +1,19 @@
-"""Run Depth Anything 3 on one sequence of an inspection asset and write depth + camera
+"""Run Depth Anything 3 on the sequences of an inspection asset and write depth + camera
 predictions back into the asset folder (predictions/{method}/...), in the same format the
 ground truth is stored in — so inspection_viz's Source toggle picks them up unchanged.
 
 Usage — inside the container (build_container.sh once, then run_container.sh for a shell):
-    python run_sequence.py ../configs/da3_glass_house.yaml
+    python run_sequence.py --data ../configs/data/old_house.yaml --model ../configs/da3.yaml
+    python run_sequence.py ../configs/da3_glass_house.yaml      # both halves in one file
 
-Paths are the same inside the container as on the host, so an absolute config path works too.
+The data config picks one sequence of the asset or all of them (see configs/data/); the model
+config holds DA3's own knobs and is reusable across assets. Sequences run one after another
+through a single loaded model.
+
+Paths are the same inside the container as on the host, so absolute config paths work too.
 Do not run this outside the container: it needs the image's torch/depth-anything-3 install.
 """
 
-import argparse
 import dataclasses
 import sys
 from pathlib import Path
@@ -18,16 +22,13 @@ import cv2
 import numpy as np
 import trimesh
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root: inspection_viz + baselines.common
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root: inspection_viz + baselines
 
-from baselines.common.config import DatasetSelection, OutputSpec, load_config
-from baselines.common.writer import (
-    cloud_path, frame_stem, output_dirs, write_cam, write_cloud, write_depth,
-)
-from inspection_viz.dataset import AssetDataset, Frame
+from baselines.common.runner import Baseline, SequenceOutput, cli_main
+from inspection_viz.dataset import Frame
 from inspection_viz.io import image_size
 
-from depth_anything_3.api import DepthAnything3
+from depth_anything_3.api import DepthAnything3 as DA3Model  # aliased: the Baseline below owns the name
 from depth_anything_3.specs import Prediction
 
 
@@ -39,13 +40,6 @@ class ModelConfig:
     use_known_poses: bool = False   # feed gt cam params as conditioning instead of predicting them
     use_ray_pose: bool = False
     ref_view_strategy: str = "saddle_balanced"
-
-
-@dataclasses.dataclass
-class Config:
-    dataset: DatasetSelection = dataclasses.field(default_factory=DatasetSelection)
-    model: ModelConfig = dataclasses.field(default_factory=ModelConfig)
-    output: OutputSpec = dataclasses.field(default_factory=OutputSpec)
 
 
 def _known_pose_arrays(frames: list[Frame]) -> tuple[np.ndarray, np.ndarray]:
@@ -105,80 +99,64 @@ def _cloud_from_glb(glb_path: Path, align: np.ndarray) -> tuple[np.ndarray, np.n
     return np.concatenate(pts), np.concatenate(cols)
 
 
-def run_inference(model: DepthAnything3, frames: list[Frame], cfg: ModelConfig,
-                  export_dir: Path | None) -> Prediction:
-    """One call over the whole sequence -- DA3 reasons jointly over everything it's given, which
-    is the only way its poses/depths come out mutually consistent. Long sequences will simply run
-    out of GPU memory; there is no chunking fallback, because per-chunk predictions live in
-    unrelated world gauges and scales.
+class DepthAnything3(Baseline):
+    """Depth Anything 3, one joint inference call per sequence."""
 
-    `export_dir` (set when we want a cloud) also gets DA3's own glb export, every parameter left at
-    its default: scene.glb + the depth_vis jpgs that come with it. `_cloud_from_glb` turns that
-    scene.glb into the .ply the viewer reads, and `main` deletes it right after -- it is a bulky
-    intermediate, and nothing downstream reads it."""
-    ext = ints = None
-    if cfg.use_known_poses:
-        ext, ints = _known_pose_arrays(frames)
-    return model.inference(
-        [str(f.rgb_path) for f in frames],
-        extrinsics=ext, intrinsics=ints,
-        use_ray_pose=cfg.use_ray_pose, ref_view_strategy=cfg.ref_view_strategy,
-        process_res=cfg.process_res,
-        export_dir=None if export_dir is None else str(export_dir), export_format="glb",
-    )
+    name = "da3"
+    Config = ModelConfig
 
+    def setup(self) -> None:
+        cfg = self.config
+        print(f"loading {cfg.hf_repo} on {cfg.device} ...")
+        self.model = DA3Model.from_pretrained(cfg.hf_repo).to(cfg.device)
+        self.model.device = cfg.device
 
-def main():
-    p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("config", help="path to a run config yaml, e.g. ../configs/da3_glass_house.yaml")
-    args = p.parse_args()
-    cfg = load_config(args.config, Config)
+    def infer(self, frames: list[Frame], export_dir: Path | None) -> Prediction:
+        """One call over the whole sequence -- DA3 reasons jointly over everything it's given,
+        which is the only way its poses/depths come out mutually consistent. Long sequences will
+        simply run out of GPU memory; there is no chunking fallback, because per-chunk predictions
+        live in unrelated world gauges and scales.
 
-    ds = AssetDataset(cfg.dataset.root)
-    variant = cfg.dataset.variant()
-    frames = cfg.dataset.select(ds.sequence(variant))  # gt sequence: rgb input (+ known poses if requested)
-    if not frames:
-        raise SystemExit(f"no frames selected for {variant} in {cfg.dataset.root}")
+        `export_dir` (set when we want a cloud) also gets DA3's own glb export, every parameter
+        left at its default: scene.glb + the depth_vis jpgs that come with it. `_cloud_from_glb`
+        turns that scene.glb into the .ply the viewer reads, and `run` deletes it right after --
+        it is a bulky intermediate, and nothing downstream reads it.
+        """
+        cfg = self.config
+        ext = ints = None
+        if cfg.use_known_poses:
+            ext, ints = _known_pose_arrays(frames)
+        return self.model.inference(
+            [str(f.rgb_path) for f in frames],
+            extrinsics=ext, intrinsics=ints,
+            use_ray_pose=cfg.use_ray_pose, ref_view_strategy=cfg.ref_view_strategy,
+            process_res=cfg.process_res,
+            export_dir=None if export_dir is None else str(export_dir), export_format="glb",
+        )
 
-    depth_dir, cam_dir = output_dirs(ds.root, ds.layout, cfg.output.method, variant.as_dict())
-    ply_path = cloud_path(ds.root, ds.layout, cfg.output.method, variant.as_dict())
-    if not cfg.output.overwrite and depth_dir.exists() and any(depth_dir.iterdir()):
-        raise SystemExit(f"{depth_dir} already has output; set output.overwrite: true to replace")
+    def run(self, frames: list[Frame], out: SequenceOutput) -> None:
+        export_dir = out.scratch_dir("da3_export") if out.spec.cloud else None
+        pred = self.infer(frames, export_dir)
+        proc_width = pred.processed_images.shape[2]
+        c2ws = np.stack([_w2c_to_c2w(pred.extrinsics[j]) for j in range(len(frames))])
+        align = _gt_frame0_alignment(c2ws, frames[0].camera().c2w)  # one rigid transform per run
+        c2ws = align @ c2ws
 
-    print(f"loading {cfg.model.hf_repo} on {cfg.model.device} ...")
-    model = DepthAnything3.from_pretrained(cfg.model.hf_repo).to(cfg.model.device)
-    model.device = cfg.model.device
+        for j, f in enumerate(frames):
+            width, height = image_size(f.rgb_path)
+            depth = cv2.resize(pred.depth[j], (width, height), interpolation=cv2.INTER_LINEAR)
+            conf = None if pred.conf is None or out.spec.min_confidence is None else \
+                cv2.resize(pred.conf[j], (width, height), interpolation=cv2.INTER_LINEAR)
+            out.write_frame(f.index, depth, c2ws[j], pred.intrinsics[j],
+                            intrinsics_width=proc_width, conf=conf)
 
-    print(f"running {len(frames)} frames in a single inference call")
-    export_dir = ply_path.parent / f"{ply_path.stem}_da3_export" if cfg.output.cloud else None
-    pred = run_inference(model, frames, cfg.model, export_dir)
-    proc_width = pred.processed_images.shape[2]
-    c2ws = np.stack([_w2c_to_c2w(pred.extrinsics[j]) for j in range(len(frames))])
-    align = _gt_frame0_alignment(c2ws, frames[0].camera().c2w)  # one rigid transform for the run
-    c2ws = align @ c2ws
-
-    for j, f in enumerate(frames):
-        width, height = image_size(f.rgb_path)
-        depth = cv2.resize(pred.depth[j], (width, height), interpolation=cv2.INTER_LINEAR)
-        if cfg.output.min_confidence is not None:
-            if pred.conf is None:
-                raise SystemExit("output.min_confidence set but the model produced no confidence map")
-            conf = cv2.resize(pred.conf[j], (width, height), interpolation=cv2.INTER_LINEAR)
-            depth = np.where(conf >= cfg.output.min_confidence, depth, np.nan).astype(np.float32)
-        stem = frame_stem(f.index)
-        write_depth(depth_dir / f"{stem}.exr", depth)
-        write_cam(cam_dir / f"{stem}.json", c2ws[j], pred.intrinsics[j], width=proc_width)
-    print(f"  wrote frames {frames[0].index}..{frames[-1].index}")
-
-    if cfg.output.cloud:
-        glb_path = export_dir / "scene.glb"
-        pts, cols = _cloud_from_glb(glb_path, align)
-        write_cloud(ply_path, pts, cols)
-        glb_path.unlink()  # scratch: the .ply carries everything the viewer reads
-        print(f"  wrote {len(pts):,} points -> {ply_path.relative_to(ds.root)}")
-
-    print(f"done: predictions/{cfg.output.method}/ under {ds.root}")
+        if out.spec.cloud:
+            glb_path = export_dir / "scene.glb"
+            pts, cols = _cloud_from_glb(glb_path, align)
+            out.write_cloud(pts, cols)
+            glb_path.unlink()  # scratch: the .ply carries everything the viewer reads
+            print(f"  wrote {len(pts):,} points -> {out.cloud_path.relative_to(out.root)}")
 
 
 if __name__ == "__main__":
-    main()
+    cli_main(DepthAnything3, description=__doc__)

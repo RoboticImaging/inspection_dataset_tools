@@ -35,6 +35,9 @@ class Layout:
         "predictions/{method}/{illumination}/clouds/soil={soil},traj={traj}.ply",
         "predictions/{method}/{illumination}/clouds/ref={reflectivity},traj={traj}.ply",
     )
+    # The config a baseline ran with, written once per method (see baselines/common/runner.py).
+    # Not a variant template: it records the whole run, every variant of it included.
+    pred_config_file: str = "predictions/{method}/config.yaml"
     mesh_file: str = "{name}_{kind}.glb"  # gt meshes at the asset root, keyed by {kind}
     rgb_exts: tuple = (".jpg", ".jpeg", ".png")
     depth_exts: tuple = (".exr",)

@@ -1,9 +1,15 @@
-# Example config for baselines/depth_anything_3/run_sequence.py.
-# Every field has a default in run_sequence.py's Config dataclasses; only override what you need.
+# Both halves of a run in one file — the shape configs had before the data/baseline split, still
+# accepted verbatim: `python run_sequence.py ../configs/da3_glass_house.yaml`. Prefer the split
+# form for new work (configs/data/old_house.yaml + configs/da3.yaml), since a data config is
+# reusable across baselines and a baseline config across assets.
+#
+# Every field has a default in run_sequence.py's dataclasses; only override what you need.
 
 dataset:
-  root: /home/jgray/eccv_2026_data/old_house/     # asset folder, e.g. path to glass_house
-  trajectory: trendspek             # null picks the only one, if there's just one
+  root: /home/jgray/eccv_2026_data/old_house/     # `asset:` is the current name for this
+  # null on an axis now means *every* value the asset has on it, not "unspecified" — so this
+  # file selects one sequence, while `illumination: null` here would select all of them.
+  trajectory: trendspek
   illumination: sunny
   soil: verylow                    # or `reflectivity:`, whichever axis this asset varies
   frame_start: 0
