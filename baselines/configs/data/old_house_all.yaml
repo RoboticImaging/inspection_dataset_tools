@@ -1,0 +1,16 @@
+# The same asset, every sequence of it: each trajectory x illumination x soil combination the
+# asset has on disk, run one after another through a single loaded model.
+#
+# Sequences that already have predictions are skipped unless `output.overwrite` is set in the
+# baseline config, so an interrupted run can simply be started again.
+
+asset: /home/jgray/eccv_2026_data/old_house/
+
+trajectory: null
+illumination: null
+soil: null
+reflectivity: null
+
+frame_start: 0
+frame_end: null
+frame_stride: 1

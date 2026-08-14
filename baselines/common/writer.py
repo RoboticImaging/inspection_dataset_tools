@@ -27,20 +27,30 @@ def frame_stem(index: int) -> str:
     return f"{index:08d}"
 
 
+def _method(method: str | None) -> str:
+    """`output.method` defaults to null, meaning "the registered name of the baseline being run"
+    — a fallback only `run_baseline` can apply, so reaching a writer without one is a bug."""
+    if not method:
+        raise ValueError("no method to write under: set output.method in the config, or run the "
+                         "baseline through baselines.common.runner.run_baseline, which falls "
+                         "back to its registered name")
+    return method
+
+
 def output_dirs(root: Path, layout: Layout, method: str, variant_dict: dict) -> tuple[Path, Path]:
     """Depth dir, cam dir for `method` + a variant (as `Variant.as_dict()`), under `root`.
 
     Predictions are keyed by the *full* variant, not just the trajectory: a baseline infers depth
     from rgb, so each illumination/soil combination is a distinct prediction with its own dir.
     """
-    kw = {"method": method, **variant_dict}
+    kw = {"method": _method(method), **variant_dict}
     return (root / fill_template(layout.pred_depth_dir, **kw),
             root / fill_template(layout.pred_cam_dir, **kw))
 
 
 def cloud_path(root: Path, layout: Layout, method: str, variant_dict: dict) -> Path:
     """The single fused .ply for `method` + a variant, under `root`."""
-    return root / fill_template(layout.pred_cloud_file, method=method, **variant_dict)
+    return root / fill_template(layout.pred_cloud_file, method=_method(method), **variant_dict)
 
 
 def write_depth(path: Path, depth: np.ndarray) -> None:
