@@ -23,7 +23,7 @@ says nothing about the surface it did reconstruct.
 
 from dataclasses import dataclass
 
-import numpy as np
+import torch
 
 from .. import geometry
 from ..case import CAP_CLOUD, EvalCase
@@ -66,9 +66,10 @@ def cloud_metrics(case: EvalCase, o: CloudOptions) -> dict:
     # Nothing left inside the evaluated region is a result, not an error: distances are
     # undefined but the method scored zero on everything thresholded.
     empty = len(pred) == 0
-    d_acc = geometry.nearest_distances(pred, gt_acc) if not empty else np.array([np.nan])
+    nan = torch.full((1,), float("nan"), dtype=geometry.POINT_DTYPE, device=pred.device)
+    d_acc = geometry.nearest_distances(pred, gt_acc) if not empty else nan
     d_comp = (geometry.nearest_distances(gt_comp, pred) if not empty
-              else np.full(len(gt_comp), np.nan))
+              else nan.expand(len(gt_comp)))
 
     # Distances are reduced over the defined ones only, so a stray point cannot nan out the
     # headline number; when *none* is defined (the empty case above) the mean stays nan, because

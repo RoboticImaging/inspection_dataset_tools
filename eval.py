@@ -12,7 +12,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from inspection_eval import evaluate, frame_gaps, metrics, targets_from_paths
+from inspection_eval import device, evaluate, frame_gaps, metrics, targets_from_paths
 from inspection_eval.case import ALIGN_MODES
 from inspection_eval.report import FORMATS
 
@@ -39,6 +39,9 @@ def parse_args(argv=None):
                    help="how predictions are put in the gt gauge, fitted to the camera centers: "
                         "sim3 (default) also solves the unknown scale, se3 assumes the "
                         "prediction is already metric, none takes the poses as they are")
+    p.add_argument("--device", default=None,
+                   help="torch device the metrics run on, e.g. cuda, cuda:1, cpu "
+                        "(default: cuda when there is one, else cpu)")
     p.add_argument("--format", default="csv,md",
                    help=f"comma-separated output formats: {','.join(FORMATS)} "
                         "(default: %(default)s)")
@@ -105,6 +108,8 @@ def main(argv=None) -> int:
         return 0
     if not args.predictions:
         raise SystemExit("give at least one <asset>/predictions/<method> folder (see --help)")
+    if args.device:
+        device.use(args.device)
 
     targets = targets_from_paths(args.predictions)
     names = [n.strip() for n in args.metrics.split(",")] if args.metrics else None

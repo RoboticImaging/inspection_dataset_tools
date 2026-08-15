@@ -5,20 +5,24 @@ pairing gt and predicted frames, fitting the gauge transform, scaling and size-m
 sampling gt meshes — so that a metric is just a function of prepared arrays, and a new metric
 needs no plumbing of its own. Everything is lazy and cached: asking for poses never loads a
 depth map, and a metric can ask twice for free.
+
+Files are read by `inspection_viz`, which speaks numpy; a case is where that crosses onto the
+eval device, so what a metric is handed is always a tensor there (see `device.py`).
 """
 
 from dataclasses import dataclass, replace
 from functools import cached_property
 from pathlib import Path
 
-import cv2
 import numpy as np
+import torch
 
 from inspection_viz.camera import Camera
 from inspection_viz.dataset import AssetDataset, Frame, Variant
 
-from . import geometry
+from . import device, geometry
 from .align import Sim3, umeyama
+from .device import stack, tensor
 
 ALIGN_MODES = ("sim3", "se3", "none")
 
@@ -28,15 +32,23 @@ CAP_DEPTH = "depth"
 CAP_CLOUD = "cloud"
 
 
-def match_size(a: np.ndarray, b: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def match_size(a, b) -> tuple[torch.Tensor, torch.Tensor]:
     """Downsample whichever of two maps is larger to the other's size, nearest-neighbour so
     invalid (nan) pixels never bleed into valid ones."""
+    a, b = tensor(a), tensor(b)
     (ha, wa), (hb, wb) = a.shape[:2], b.shape[:2]
     if (ha, wa) == (hb, wb):
         return a, b
     if ha * wa > hb * wb:
-        return cv2.resize(a, (wb, hb), interpolation=cv2.INTER_NEAREST), b
-    return a, cv2.resize(b, (wa, ha), interpolation=cv2.INTER_NEAREST)
+        return _resize(a, hb, wb), b
+    return a, _resize(b, ha, wa)
+
+
+def _resize(depth: torch.Tensor, height: int, width: int) -> torch.Tensor:
+    """Nearest-neighbour resample of a (H,W) map; picks the same source pixel cv2's
+    INTER_NEAREST did, and never averages, so a nan stays confined to its own pixel."""
+    return torch.nn.functional.interpolate(depth[None, None], size=(height, width),
+                                           mode="nearest")[0, 0]
 
 
 @dataclass
@@ -94,8 +106,8 @@ class EvalCase:
         """Gauge transform prediction -> gt, fitted to the shared camera centers."""
         if self.align_mode == "none" or len(self.cam_frames) < 3:
             return Sim3()
-        src = np.array([self.raw_pred_cams[i].position for i in self.cam_frames])
-        dst = np.array([self.gt_cams[i].position for i in self.cam_frames])
+        src = stack([self.raw_pred_cams[i].position for i in self.cam_frames])
+        dst = stack([self.gt_cams[i].position for i in self.cam_frames])
         return umeyama(src, dst, with_scale=self.align_mode == "sim3")
 
     @cached_property
@@ -113,7 +125,7 @@ class EvalCase:
         have_pred = {i for i, f in self.pred_frames.items() if f.depth_path is not None}
         return sorted(have_gt & have_pred)
 
-    def depth_pair(self, index: int) -> tuple[np.ndarray, np.ndarray]:
+    def depth_pair(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
         """(gt, predicted) depth for one frame, in meters, same size, invalid pixels nan.
 
         The prediction is *not* rescaled here — how to resolve the depth scale is the depth
@@ -131,7 +143,7 @@ class EvalCase:
         return self.dataset.cloud_path(self.variant, self.method)
 
     def pred_cloud(self, source: str = "auto", stride: int = 4,
-                   max_points: int | None = 2_000_000) -> np.ndarray:
+                   max_points: int | None = 2_000_000) -> torch.Tensor:
         """The predicted surface as (N,3) points in the gt gauge.
 
         `source`: "fused" uses the method's own fused .ply, "unprojected" unprojects its
@@ -146,22 +158,26 @@ class EvalCase:
             if self.fused_cloud_path is None:
                 raise FileNotFoundError(f"no fused cloud for {self.method} / {self.variant}")
             pts, _ = io.read_cloud(self.fused_cloud_path)
+            pts = tensor(pts, geometry.POINT_DTYPE)
         else:
             chunks = []
             for i in self.depth_frames:
                 cam = self.raw_pred_cams.get(i)
                 if cam is None:
                     continue
-                depth = _clean(self.pred_frames[i].depth(), far=_far(cam))
-                chunks.append(cam.unproject(depth, stride=stride)[0])
+                # `Camera.unproject` is the viewer's, and reads the cam's own numpy intrinsics;
+                # the points come straight back onto the device.
+                depth = device.numpy(_clean(self.pred_frames[i].depth(), far=_far(cam)))
+                chunks.append(tensor(cam.unproject(depth, stride=stride)[0],
+                                     geometry.POINT_DTYPE))
             if not chunks:
                 raise FileNotFoundError(f"no depth+poses to unproject for {self.method}")
-            pts = np.concatenate(chunks)
+            pts = torch.cat(chunks)
         # Filtered before the cap so `max_points` counts usable points, not nan padding.
         pts = geometry.subsample(geometry.finite(pts), max_points)
         return self.transform.points(pts)
 
-    def gt_cloud(self, kind: str, n_points: int = 1_000_000) -> np.ndarray:
+    def gt_cloud(self, kind: str, n_points: int = 1_000_000) -> torch.Tensor:
         """(n_points, 3) sampled off the gt mesh of that `kind` (see `AssetDataset.meshes`)."""
         return geometry.sample_mesh(self.dataset.meshes[kind], n_points, self.cache_dir)
 
@@ -203,9 +219,9 @@ def _far(cam: Camera | None) -> float | None:
     return None if cam is None or cam.far is None else cam.far * 0.999
 
 
-def _clean(depth: np.ndarray, far: float | None) -> np.ndarray:
-    d = np.asarray(depth, dtype=np.float32)
-    invalid = ~np.isfinite(d) | (d <= 0)
+def _clean(depth, far: float | None) -> torch.Tensor:
+    d = tensor(depth, torch.float32)
+    invalid = ~torch.isfinite(d) | (d <= 0)
     if far is not None:
         invalid |= d >= far
-    return np.where(invalid, np.nan, d)
+    return d.masked_fill(invalid, float("nan"))

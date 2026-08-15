@@ -19,11 +19,14 @@ monocular-depth convention, and the right choice when only relative depth qualit
 interest; `"none"` takes the prediction at face value (use it with gt-conditioned runs).
 """
 
+import math
 from dataclasses import dataclass
 
-import numpy as np
+import torch
 
 from ..case import CAP_DEPTH, EvalCase
+from ..device import DTYPE, tensor
+from . import stats
 from .base import register
 from .stats import positive_depth
 
@@ -38,11 +41,11 @@ class DepthOptions:
 @register("depth", needs=(CAP_DEPTH,), options=DepthOptions)
 def depth_metrics(case: EvalCase, o: DepthOptions) -> dict:
     frames = _select(case.depth_frames, o.max_frames)
-    taus = np.asarray(o.thresholds, dtype=float)
+    taus = tensor(o.thresholds, DTYPE)
 
     n_px = n_valid = n_valid_gt = n_valid_est = 0
     sum_abs = sum_sq = sum_rel = sum_si = 0.0
-    within = np.zeros(len(taus))
+    within = torch.zeros(len(taus), dtype=DTYPE, device=taus.device)
 
     for index in frames:
         gt, pred = case.depth_pair(index)
@@ -55,37 +58,38 @@ def depth_metrics(case: EvalCase, o: DepthOptions) -> dict:
         valid_est = positive_depth(pred)
         valid = valid_gt & valid_est
 
-        n_px += gt.size
-        n_valid_gt += int(np.count_nonzero(valid_gt))
-        n_valid_est += int(np.count_nonzero(valid_est))
-        n_valid += int(np.count_nonzero(valid))
-        if not np.any(valid):
+        n_px += gt.numel()
+        n_valid_gt += int(torch.count_nonzero(valid_gt))
+        n_valid_est += int(torch.count_nonzero(valid_est))
+        n_valid += int(torch.count_nonzero(valid))
+        if not torch.any(valid):
             continue
 
-        g, e = gt[valid].astype(np.float64), pred[valid].astype(np.float64)
-        abs_diff = np.abs(g - e)
+        g, e = gt[valid].to(DTYPE), pred[valid].to(DTYPE)
+        abs_diff = torch.abs(g - e)
         sum_abs += float(abs_diff.sum())
         sum_sq += float((abs_diff**2).sum())
         sum_rel += float((abs_diff / g).sum())
 
-        ratio = np.maximum(g / e, e / g)
-        within += (ratio[:, None] < taus[None, :]).sum(axis=0)
+        ratio = torch.maximum(g / e, e / g)
+        within += (ratio[:, None] < taus[None, :]).sum(dim=0)
 
-        log_err = np.log(g) - np.log(e)
+        log_err = torch.log(g) - torch.log(e)
         sum_si += float(((log_err - log_err.mean()) ** 2).sum())
 
     if n_valid == 0:
         raise ValueError("no pixel is valid in both the gt and the predicted depth maps")
 
     row = {
-        "RMSE (m)": np.sqrt(sum_sq / n_valid),
+        "RMSE (m)": (sum_sq / n_valid) ** 0.5,
         "MAE (m)": sum_abs / n_valid,
         "Relative MAE": sum_rel / n_valid,
         "Scale invariant MSE": sum_si / n_valid,
     }
-    for tau, count in zip(o.thresholds, within):
+    counts = [float(c) for c in within]  # one hop back to the host, for the row
+    for tau, count in zip(o.thresholds, counts):
         row[f"Accuracy @{tau}"] = count / n_valid_est if n_valid_est else float("nan")
-    for tau, count in zip(o.thresholds, within):
+    for tau, count in zip(o.thresholds, counts):
         row[f"Completeness @{tau}"] = count / n_valid_gt if n_valid_gt else float("nan")
     row.update({
         "Valid px ratio (est)": n_valid_est / n_px,
@@ -99,7 +103,8 @@ def depth_metrics(case: EvalCase, o: DepthOptions) -> dict:
 def _select(frames: list, max_frames: int | None) -> list:
     if max_frames is None or len(frames) <= max_frames:
         return frames
-    return [frames[i] for i in np.linspace(0, len(frames) - 1, max_frames).astype(int)]
+    picks = torch.linspace(0, len(frames) - 1, max_frames).long().tolist()
+    return [frames[i] for i in picks]
 
 
 def _sequence_scale(case: EvalCase, o: DepthOptions) -> float:
@@ -109,7 +114,7 @@ def _sequence_scale(case: EvalCase, o: DepthOptions) -> float:
         # A degenerate gauge fit (collinear or coincident camera centers) would multiply every
         # depth map by nan or flip its sign; every number below would then be nan or nonsense,
         # so the metric fails loudly here instead of reporting them.
-        if not np.isfinite(scale) or scale <= 0:
+        if not math.isfinite(scale) or scale <= 0:
             raise ValueError(f"the gauge alignment gave an unusable depth scale ({scale}); "
                              "use scale=median or scale=none for this case")
         return scale
@@ -120,13 +125,14 @@ def _sequence_scale(case: EvalCase, o: DepthOptions) -> float:
     raise ValueError(f"scale must be 'align', 'median' or 'none', got {o.scale!r}")
 
 
-def _frame_scale(case: EvalCase, o: DepthOptions, gt: np.ndarray, pred: np.ndarray) -> float:
+def _frame_scale(case: EvalCase, o: DepthOptions, gt: torch.Tensor,
+                 pred: torch.Tensor) -> float:
     if o.scale != "median":
         return _sequence_scale(case, o)
     valid = positive_depth(gt) & positive_depth(pred)
-    if not np.any(valid):
+    if not torch.any(valid):
         return 1.0
-    scale = float(np.median(gt[valid] / pred[valid]))
+    scale = stats.median(gt[valid] / pred[valid])
     # One unusable frame should cost that frame, not the sequence: leaving it at 1.0 keeps it in
     # the aggregate as the (large) error it is, rather than nan-ing every pixel of it.
-    return scale if np.isfinite(scale) and scale > 0 else 1.0
+    return scale if math.isfinite(scale) and scale > 0 else 1.0

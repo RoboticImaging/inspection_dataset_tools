@@ -8,32 +8,44 @@ silent (nan renders as "nan" in the table and nothing says why).
 
 The rule throughout is: drop what is undefined, reduce over what is left, and let the caller say
 what an empty result means via `default` — nan where the number is genuinely unknowable, 0.0
-where "nothing qualified" is itself the answer. That is deliberately not `np.nanmean`, which
-warns on an all-nan slice and returns nan regardless of which of those two cases it was.
+where "nothing qualified" is itself the answer. That is deliberately not `torch.nanmean`, which
+returns nan for an all-nan slice regardless of which of those two cases it was, and reduces over
+inf as if it were data.
+
+Each of these takes tensors and returns a python float: a row of a results table is host-side
+numbers, and this is the last device operation before it.
 """
 
-import numpy as np
+import torch
+
+from ..device import tensor
 
 
-def finite(values) -> np.ndarray:
+def finite(values) -> torch.Tensor:
     """The finite entries of `values`, flattened."""
-    a = np.asarray(values, dtype=float).ravel()
-    return a[np.isfinite(a)]
+    a = tensor(values).ravel()
+    return a[torch.isfinite(a)]
 
 
 def mean(values, default: float = float("nan")) -> float:
     a = finite(values)
-    return float(a.mean()) if a.size else float(default)
+    return float(a.mean()) if a.numel() else float(default)
 
 
 def median(values, default: float = float("nan")) -> float:
     a = finite(values)
-    return float(np.median(a)) if a.size else float(default)
+    if not a.numel():
+        return float(default)
+    # torch.median is the lower of the two middles on an even count; the average of them is what
+    # numpy called the median here, and what the tables have always reported.
+    ordered = a.sort().values
+    n = ordered.numel()
+    return float((ordered[(n - 1) // 2] + ordered[n // 2]) / 2)
 
 
 def rms(values, default: float = float("nan")) -> float:
     a = finite(values)
-    return float(np.sqrt((a**2).mean())) if a.size else float(default)
+    return float((a**2).mean().sqrt()) if a.numel() else float(default)
 
 
 def fraction_below(values, threshold: float, default: float = float("nan")) -> float:
@@ -45,14 +57,14 @@ def fraction_below(values, threshold: float, default: float = float("nan")) -> f
     coincide, because then every entry is undefined.
     """
     a = finite(values)
-    return float(np.count_nonzero(a < threshold) / a.size) if a.size else float(default)
+    return float(torch.count_nonzero(a < threshold) / a.numel()) if a.numel() else float(default)
 
 
-def positive_depth(depth: np.ndarray) -> np.ndarray:
+def positive_depth(depth: torch.Tensor) -> torch.Tensor:
     """Mask of the pixels a depth map can be compared at: finite and in front of the camera.
 
     Depth metrics divide by depth and take its log, so zero and negative are as unusable as nan
     even though they survive `isfinite`.
     """
-    d = np.asarray(depth)
-    return np.isfinite(d) & (d > 0)
+    d = tensor(depth)
+    return torch.isfinite(d) & (d > 0)

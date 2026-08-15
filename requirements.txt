@@ -1,5 +1,6 @@
 viser
 numpy
+torch
 scipy
 trimesh
 fast-simplification

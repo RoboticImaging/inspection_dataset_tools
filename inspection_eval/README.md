@@ -22,8 +22,26 @@ It prints a markdown table per metric and writes them to `--out` (default `eval_
 ```
 
 Useful flags: `--metrics pose,depth` to run a subset, `--traj/--illumination/--soil/--reflectivity`
-to evaluate one variant, `--align`, `--set` (below), `--list-metrics` to print every metric with
-its options and defaults.
+to evaluate one variant, `--align`, `--set` (below), `--device`, `--list-metrics` to print every
+metric with its options and defaults.
+
+## Device
+
+Every array is a torch tensor and every metric runs on the gpu when there is one. The device is
+picked once, in `device.py`: cuda if available, else cpu, overridden by `--device cuda:1`, by
+`$INSPECTION_EVAL_DEVICE`, or by `inspection_eval.device.use()` in code. Nothing else in the
+package knows what a device is — data arrives from `inspection_viz` as numpy (EXR maps, `.ply`
+clouds, sampled meshes, cam jsons), crosses over in `device.tensor`, and leaves as plain floats
+in a results row.
+
+Poses and depth are computed in float64 and match the numbers the numpy version gave to the last
+bit. Clouds are float32 — they are three orders of magnitude larger than anything else here —
+which moves a point-to-surface distance by a micron or so, and with it the odd point across an
+F-score threshold: expect the cloud table to agree to about four digits rather than exactly.
+
+Reading a single number back from the device costs about a millisecond and a half, which is more
+than most of these metrics' arithmetic. If you add a metric, keep `float(...)`, `.item()` and
+`int(tensor)` out of per-frame and per-cell loops — build the row at the end.
 
 ## Alignment: the gauge problem
 

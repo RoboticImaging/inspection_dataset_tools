@@ -6,6 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import torch
 import trimesh
 
 from conftest import WH, make_asset, make_predictions, write_cam, write_depth_exr
@@ -36,8 +37,8 @@ def test_umeyama_recovers_a_known_similarity():
     fitted = umeyama(src, truth.points(src))
 
     assert fitted.scale == pytest.approx(truth.scale)
-    assert np.allclose(fitted.R, truth.R, atol=1e-9)
-    assert np.allclose(fitted.points(src), truth.points(src), atol=1e-9)
+    assert torch.allclose(fitted.R, truth.R, atol=1e-9)
+    assert torch.allclose(fitted.points(src), truth.points(src), atol=1e-9)
 
 
 def test_umeyama_without_scale_keeps_unit_scale():
@@ -92,12 +93,13 @@ def case_asset(tmp_path: Path, method="da3", scale=1.0, shift=(0.0, 0.0, 0.0),
 def write_gt_mesh(root: Path, kind: str, extent=(4.0, 4.0, 0.1), center=(1.5, 0.0, 0.0)):
     """A flat gt slab, described in the dataset's Z-up world and written out Y-up as glTF is —
     so a case that forgets to rotate the mesh back gets a slab standing on its edge."""
+    from inspection_eval.device import numpy as to_numpy
     from inspection_eval.geometry import GLTF_TO_Z_UP
 
     box = trimesh.creation.box(extents=extent)
     box.apply_translation(center)
     to_gltf = np.eye(4)
-    to_gltf[:3, :3] = GLTF_TO_Z_UP.T
+    to_gltf[:3, :3] = to_numpy(GLTF_TO_Z_UP.T)  # the eval's constant lives on the eval device
     box.apply_transform(to_gltf)
     box.export(root / f"{root.name}_{kind}.glb")
 

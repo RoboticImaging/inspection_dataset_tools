@@ -174,3 +174,5 @@ venv/bin/python eval.py /data/old_house                     # same: an asset roo
   `--align none` for runs conditioned on gt poses.
 - Useful flags: `--metrics pose,depth`, `--traj/--illumination/--soil/--reflectivity` to score a
   single variant, `--set metric.option=value`, `--list-metrics`, `--allow-missing-frames`.
+- The metrics are torch and run on the gpu when there is one; `--device cpu` (or
+  `$INSPECTION_EVAL_DEVICE`) if you would rather they didn't.

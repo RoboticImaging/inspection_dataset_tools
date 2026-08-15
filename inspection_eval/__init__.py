@@ -10,8 +10,13 @@ combination that method was run on, producing one results table per metric:
 `inspection_eval.case.EvalCase` is the layer that pairs gt with a prediction and puts the
 prediction in the gt gauge; `inspection_eval.metrics` is the registry of scoring functions
 (see `metrics/base.py` for how to add one).
+
+Everything is computed with torch, on the gpu when there is one — `inspection_eval.device` picks
+it (cuda by default, `INSPECTION_EVAL_DEVICE` or `device.use()` to say otherwise) and is the
+only module that has an opinion about where an array lives.
 """
 
+from . import device
 from .align import Sim3, umeyama
 from .case import EvalCase
 from .metrics import REGISTRY, Metric, register
@@ -20,5 +25,5 @@ from .runner import (FrameGap, Results, Target, evaluate, frame_gaps, target_fro
                     targets_from_paths, variants)
 
 __all__ = ["EvalCase", "FrameGap", "Metric", "REGISTRY", "Results", "Sim3", "Table", "Target",
-           "evaluate", "frame_gaps", "register", "target_from_path", "targets_from_paths",
-           "umeyama", "variants"]
+           "device", "evaluate", "frame_gaps", "register", "target_from_path",
+           "targets_from_paths", "umeyama", "variants"]
