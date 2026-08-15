@@ -15,6 +15,7 @@ Do not run this outside the container: it needs the image's torch/depth-anything
 """
 
 import dataclasses
+import shutil
 import sys
 from pathlib import Path
 
@@ -118,9 +119,10 @@ class DepthAnything3(Baseline):
         live in unrelated world gauges and scales.
 
         `export_dir` (set when we want a cloud) also gets DA3's own glb export, every parameter
-        left at its default: scene.glb + the depth_vis jpgs that come with it. `_cloud_from_glb`
-        turns that scene.glb into the .ply the viewer reads, and `run` deletes it right after --
-        it is a bulky intermediate, and nothing downstream reads it.
+        left at its default except `export_depth_vis`, so the only thing written is scene.glb --
+        the depth_vis jpgs and the scene.jpg thumbnail copied from them are pure visualisation
+        that nothing here reads. `_cloud_from_glb` turns that scene.glb into the .ply the viewer
+        reads, and `run` deletes the whole export dir right after -- it is a bulky intermediate.
         """
         cfg = self.config
         ext = ints = None
@@ -132,6 +134,7 @@ class DepthAnything3(Baseline):
             use_ray_pose=cfg.use_ray_pose, ref_view_strategy=cfg.ref_view_strategy,
             process_res=cfg.process_res,
             export_dir=None if export_dir is None else str(export_dir), export_format="glb",
+            export_kwargs={"glb": {"export_depth_vis": False}},
         )
 
     def run(self, frames: list[Frame], out: SequenceOutput) -> None:
@@ -151,10 +154,9 @@ class DepthAnything3(Baseline):
                             intrinsics_width=proc_width, conf=conf)
 
         if out.spec.cloud:
-            glb_path = export_dir / "scene.glb"
-            pts, cols = _cloud_from_glb(glb_path, align)
+            pts, cols = _cloud_from_glb(export_dir / "scene.glb", align)
             out.write_cloud(pts, cols)
-            glb_path.unlink()  # scratch: the .ply carries everything the viewer reads
+            shutil.rmtree(export_dir)  # scratch: the .ply carries everything the viewer reads
             print(f"  wrote {len(pts):,} points -> {out.cloud_path.relative_to(out.root)}")
 
 
