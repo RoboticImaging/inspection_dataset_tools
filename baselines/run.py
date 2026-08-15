@@ -18,8 +18,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # repo root
 
 from baselines import registry
-from baselines.common.config import add_config_args, config_from_args
-from baselines.common.runner import run_baseline
+from baselines.common.config import add_config_args
+from baselines.common.runner import run_from_args
 
 
 def main(argv=None) -> None:
@@ -29,10 +29,7 @@ def main(argv=None) -> None:
                    help=f"which baseline to run; registered: {', '.join(registry.available())}")
     add_config_args(p)
     args = p.parse_args(argv)
-
-    baseline_cls = registry.get(args.baseline)
-    cfg = config_from_args(args, baseline_cls.Config)
-    run_baseline(baseline_cls(cfg.model), cfg)
+    run_from_args(registry.get(args.baseline), args)
 
 
 if __name__ == "__main__":

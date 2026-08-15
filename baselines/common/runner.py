@@ -188,11 +188,16 @@ def write_run_config(root: Path, layout: Layout, method: str, baseline: Baseline
     return path
 
 
-def cli_main(baseline_cls: type, argv=None, description: str = None) -> None:
+def run_from_args(baseline_cls: type, args) -> list[Variant]:
+    """Run `baseline_cls` from parsed `add_config_args` arguments — the tail end of both
+    entry points (a baseline's own `run_sequence.py` and `baselines/run.py`)."""
+    cfg = config_from_args(args, baseline_cls.Config)
+    return run_baseline(baseline_cls(cfg.model), cfg)
+
+
+def cli_main(baseline_cls: type, argv=None, description: str = None) -> list[Variant]:
     """The `main()` of a baseline's own `run_sequence.py`: parse configs, run, write."""
     p = argparse.ArgumentParser(description=description or baseline_cls.__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     add_config_args(p)
-    args = p.parse_args(argv)
-    cfg = config_from_args(args, baseline_cls.Config)
-    run_baseline(baseline_cls(cfg.model), cfg)
+    return run_from_args(baseline_cls, p.parse_args(argv))

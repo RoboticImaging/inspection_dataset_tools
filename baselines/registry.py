@@ -26,5 +26,8 @@ def get(name: str) -> type:
     if name not in BASELINES:
         raise SystemExit(f"unknown baseline {name!r}; registered: {', '.join(available())}")
     module_path, _, class_name = BASELINES[name].partition(":")
-    module = importlib.import_module(module_path)
-    return getattr(module, class_name)
+    cls = getattr(importlib.import_module(module_path), class_name)
+    if cls.name != name:  # the key here and the class attribute pick the predictions/ folder
+        raise SystemExit(f"{BASELINES[name]} calls itself {cls.name!r} but is registered as "
+                         f"{name!r}; they must match")
+    return cls

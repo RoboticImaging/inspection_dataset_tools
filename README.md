@@ -64,20 +64,17 @@ Rules that hold for every baseline:
    soil: verylow          # or `reflectivity:`, whichever axis this asset varies
    frame_stride: 1
    ```
-   **All sequences** — leave the axes `null` (a list narrows it to a subset):
+   **All sequences** — drop the axis keys (or set them `null`); a list runs a subset:
    ```yaml
-   # baselines/configs/data/old_house_all.yaml
    asset: /data/old_house
-   trajectory: null
-   illumination: null
-   soil: null
+   illumination: [sunny, overcast]   # and every trajectory and soil level, since neither is named
    ```
 3. Pick or edit the baseline config (`baselines/configs/da3.yaml`: checkpoint, `process_res`,
    `use_known_poses`, `min_confidence`, `cloud`, `overwrite`).
 4. Run it — same command for one sequence or all, only the data config differs:
    ```bash
    baselines/depth_anything_3/run_container.sh python run_sequence.py \
-       --data ../configs/data/old_house_all.yaml --model ../configs/da3.yaml
+       --data ../configs/data/old_house.yaml --model ../configs/da3.yaml
    ```
 
 Notes:
