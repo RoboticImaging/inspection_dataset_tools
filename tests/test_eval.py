@@ -2,6 +2,7 @@
 and the runner's discovery of variants inside a prediction folder."""
 
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -527,6 +528,273 @@ def test_eval_cli_allow_missing_frames_runs_anyway(tmp_path):
     assert rc == 0
     rows = list(csv.DictReader((tmp_path / "out" / "depth.csv").open()))
     assert rows[0]["Frames"] == "3"  # frame 3 dropped, the other 3 still scored
+
+
+# --- progress and streaming ------------------------------------------------------------------
+
+
+def multi_variant_asset(tmp_path: Path, illums=("sunny", "night")) -> Path:
+    """An asset with one case per illumination, so a run has several cases to march through."""
+    layout = Layout()
+    root = make_asset(tmp_path / "asset", illums=illums, soils=("low",), n_frames=2)
+    for illum in illums:
+        make_predictions(root, layout, "da3",
+                         {"traj": "trajA", "illumination": illum, "soil": "low"}, n_frames=2)
+    return root / "predictions" / "da3"
+
+
+def test_evaluate_counts_every_case_before_it_starts(tmp_path):
+    events = []
+    evaluate(targets_from_paths([multi_variant_asset(tmp_path)]), ["pose"],
+             on_event=lambda kind, message, **info: events.append((kind, info)))
+
+    assert ("plan", {"total": 2, "metrics": ["pose"], "done": 0}) in events
+    assert [i["index"] for k, i in events if k == "case"] == [1, 2]
+    assert ("done", {"index": 2, "total": 2}) in events
+
+
+def test_evaluate_hands_over_the_results_after_every_case(tmp_path):
+    rows = []
+    results = evaluate(targets_from_paths([multi_variant_asset(tmp_path)]), ["pose"],
+                       after_case=lambda partial: rows.append(len(partial.tables["pose"])))
+
+    assert rows == [1, 2]  # grows as it goes, and is the same object that comes back
+    assert len(results.tables["pose"]) == 2
+
+
+def test_progress_bar_counts_and_fills():
+    import eval as eval_cli
+
+    filled, empty = eval_cli.BLOCKS
+    assert eval_cli.progress_bar(1, 4, width=4) == f"[1/4] {filled}{empty * 3}"
+    assert eval_cli.progress_bar(4, 4, width=4) == f"[4/4] {filled * 4}"
+    assert eval_cli.progress_bar(3, 12, width=4).startswith("[ 3/12] ")  # count right-aligned
+
+
+def test_progress_prints_one_counter_line_per_case(capsys):
+    import eval as eval_cli
+
+    progress = eval_cli.Progress(quiet=False)
+    progress("plan", "2 case(s) x 1 metric(s)", total=2, metrics=["pose"])
+    progress("case", "asset / da3 / v1", index=1, total=2)
+    progress("metric", "  pose: ok")
+    progress("case", "asset / da3 / v2", index=2, total=2)
+    progress("done", "2 case(s) scored", index=2, total=2)
+
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0] == "2 case(s) x 1 metric(s)"
+    assert lines[1].startswith("[1/2] ") and lines[1].endswith(" asset / da3 / v1")
+    assert lines[2] == "  pose: ok"
+    assert lines[3].startswith("[2/2] ")
+
+
+def test_progress_redraws_one_line_when_quiet_on_a_terminal():
+    import io
+
+    import eval as eval_cli
+
+    stream = io.StringIO()
+    stream.isatty = lambda: True
+    progress = eval_cli.Progress(quiet=True, stream=stream)
+    progress("plan", "2 case(s)", total=2, metrics=["pose"])
+    progress("case", "asset / da3 / v1", index=1, total=2)
+    progress("metric", "  pose: ok")  # swallowed: the bar owns the line
+    progress("done", "2 case(s) scored", index=2, total=2)
+
+    out = stream.getvalue()
+    assert out.count("\r") == 2 and out.count("\n") == 1 and out.endswith("\n")
+    assert "pose: ok" not in out and "2 case(s)" not in out
+
+
+def test_progress_stays_silent_when_quiet_and_piped(capsys):
+    import eval as eval_cli
+
+    progress = eval_cli.Progress(quiet=True)  # capsys' stdout is not a tty
+    progress("plan", "2 case(s)", total=2, metrics=["pose"])
+    progress("case", "asset / da3 / v1", index=1, total=2)
+    progress("done", "2 case(s) scored", index=2, total=2)
+
+    assert capsys.readouterr().out == ""
+
+
+def test_eval_cli_writes_each_case_as_it_is_scored(tmp_path):
+    """The second case must find the first one's row already on disk."""
+    import csv
+
+    import eval as eval_cli
+    from inspection_eval.metrics import REGISTRY, register
+
+    out = tmp_path / "out"
+    seen = []
+
+    @register("spy")
+    def spy(case, options):
+        seen.append(sorted(p.read_text() for p in out.rglob("spy.csv")))
+        return {"Case": len(seen)}
+
+    try:
+        rc = eval_cli.main([str(multi_variant_asset(tmp_path)), "--out", str(out),
+                            "--metrics", "spy", "--format", "csv", "-q"])
+    finally:
+        REGISTRY.pop("spy")
+
+    assert rc == 0
+    assert seen[0] == []  # nothing written yet on the first case
+    first = seen[1][0].strip().splitlines()  # the second case sees the first one's csv
+    assert len(first) == 2 and first[0].endswith("Case") and first[1].endswith(",1")
+    rows = list(csv.DictReader(next(out.rglob("spy.csv")).open()))
+    assert [r["Case"] for r in rows] == ["1", "2"]
+
+
+def test_eval_cli_no_stream_writes_only_at_the_end(tmp_path):
+    import eval as eval_cli
+    from inspection_eval.metrics import REGISTRY, register
+
+    out = tmp_path / "out"
+    seen = []
+
+    @register("spy_end")
+    def spy_end(case, options):
+        seen.append(list(out.rglob("spy_end.csv")))
+        return {"Case": len(seen)}
+
+    try:
+        rc = eval_cli.main([str(multi_variant_asset(tmp_path)), "--out", str(out), "--no-stream",
+                            "--metrics", "spy_end", "--format", "csv", "-q"])
+    finally:
+        REGISTRY.pop("spy_end")
+
+    assert rc == 0
+    assert seen == [[], []]  # nothing on disk while the run is going
+    assert len(list(out.rglob("spy_end.csv"))) == 1
+
+
+# --- reusing a named folder ------------------------------------------------------------------
+
+
+def test_eval_cli_writes_into_the_folder_named_by_name(tmp_path):
+    import eval as eval_cli
+
+    ds = case_asset(tmp_path, n_frames=2)
+    rc = eval_cli.main([str(ds.root / "predictions" / "da3"), "--out", str(tmp_path / "out"),
+                        "--name", "run7", "-q"])
+
+    assert rc == 0
+    assert [p.name for p in (tmp_path / "out").iterdir()] == ["run7"]
+    assert (tmp_path / "out" / "run7" / "depth.csv").is_file()
+
+
+def test_read_tables_types_the_numbers_back(tmp_path):
+    from inspection_eval.report import Table, read_tables
+
+    table = Table("pose")
+    table.add({"Asset": "old_house", "ATE RMSE (m)": 0.1023, "Frames": 12})
+    table.write(tmp_path, ("csv",))
+
+    back = read_tables(tmp_path)["pose"]
+    assert back.columns == ["Asset", "ATE RMSE (m)", "Frames"]
+    assert back.rows == [{"Asset": "old_house", "ATE RMSE (m)": 0.1023, "Frames": 12}]
+    assert back.to_markdown() == table.to_markdown()  # so a resumed run renders like one run
+
+
+def test_evaluate_resumes_past_the_cases_a_previous_run_finished(tmp_path):
+    from inspection_eval.report import read_tables
+
+    targets = targets_from_paths([multi_variant_asset(tmp_path)])
+    first = evaluate(targets, ["pose"], filters={"illumination": "sunny"})
+    first.write(tmp_path / "out", ("csv",))
+    assert len(first.tables["pose"]) == 1
+
+    scored = []
+    second = evaluate(targets, ["pose"], resume=read_tables(tmp_path / "out"),
+                      on_event=lambda kind, message, **info: scored.append(kind))
+
+    assert len(second.tables["pose"]) == 2  # the kept row plus the one it was missing
+    assert scored.count("resumed") == 1 and scored.count("metric") == 1
+    assert {r["Illumination"] for r in second.tables["pose"].rows} == {"sunny", "night"}
+
+
+def test_eval_cli_continues_a_named_folder_from_where_it_stopped(tmp_path):
+    import csv
+
+    import eval as eval_cli
+
+    predictions = multi_variant_asset(tmp_path)
+    out = tmp_path / "out" / "run7"
+    argv = [str(predictions), "--out", str(tmp_path / "out"), "--name", "run7",
+            "--metrics", "pose", "--format", "csv", "-q"]
+
+    assert eval_cli.main(argv + ["--illumination", "sunny"]) == 0  # a run cut short
+    assert len(list(csv.DictReader((out / "pose.csv").open()))) == 1
+
+    assert eval_cli.main(argv + ["--resume"]) == 0  # the rest of it
+
+    rows = list(csv.DictReader((out / "pose.csv").open()))
+    assert [r["Illumination"] for r in rows] == ["sunny", "night"]  # kept row first, then the new
+
+
+def test_eval_cli_overwrite_starts_the_named_folder_again(tmp_path):
+    import csv
+
+    import eval as eval_cli
+
+    predictions = multi_variant_asset(tmp_path)
+    out = tmp_path / "out" / "run7"
+    argv = [str(predictions), "--out", str(tmp_path / "out"), "--name", "run7",
+            "--metrics", "pose", "--format", "csv", "-q"]
+
+    assert eval_cli.main(argv + ["--illumination", "sunny"]) == 0
+    (out / "notes.md").write_text("mine\n")  # not a table: left alone
+
+    assert eval_cli.main(argv + ["--overwrite", "--illumination", "night"]) == 0
+
+    rows = list(csv.DictReader((out / "pose.csv").open()))
+    assert [r["Illumination"] for r in rows] == ["night"]  # the sunny row is gone, not kept
+    assert (out / "notes.md").is_file()
+
+
+def test_eval_cli_asks_what_to_do_with_an_existing_folder(tmp_path, monkeypatch):
+    import csv
+
+    import eval as eval_cli
+
+    predictions = multi_variant_asset(tmp_path)
+    out = tmp_path / "out" / "run7"
+    argv = [str(predictions), "--out", str(tmp_path / "out"), "--name", "run7",
+            "--metrics", "pose", "--format", "csv", "-q"]
+    assert eval_cli.main(argv + ["--illumination", "sunny"]) == 0
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True, raising=False)
+
+    monkeypatch.setattr("builtins.input", lambda *a: "q")  # quit changes nothing
+    with pytest.raises(SystemExit):
+        eval_cli.main(argv)
+    assert len(list(csv.DictReader((out / "pose.csv").open()))) == 1
+
+    monkeypatch.setattr("builtins.input", lambda *a: "")  # default: continue
+    assert eval_cli.main(argv) == 0
+    assert len(list(csv.DictReader((out / "pose.csv").open()))) == 2
+
+    monkeypatch.setattr("builtins.input", lambda *a: "o")  # overwrite
+    assert eval_cli.main(argv + ["--illumination", "night"]) == 0
+    assert len(list(csv.DictReader((out / "pose.csv").open()))) == 1
+
+
+def test_eval_cli_keeps_results_when_asked_nothing(tmp_path, capsys):
+    """No terminal to answer the question: continue, because that destroys nothing."""
+    import csv
+
+    import eval as eval_cli
+
+    predictions = multi_variant_asset(tmp_path)
+    out = tmp_path / "out" / "run7"
+    argv = [str(predictions), "--out", str(tmp_path / "out"), "--name", "run7",
+            "--metrics", "pose", "--format", "csv", "-q"]
+    assert eval_cli.main(argv + ["--illumination", "sunny"]) == 0
+
+    assert eval_cli.main(argv) == 0  # capsys' stdin is not a tty
+
+    assert len(list(csv.DictReader((out / "pose.csv").open()))) == 2
+    assert "continuing from there" in capsys.readouterr().out
 
 
 # --- eval.py's output folder naming ---------------------------------------------------------

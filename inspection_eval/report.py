@@ -72,6 +72,34 @@ class Table:
         return written
 
 
+def read_table(path: Path) -> Table:
+    """The `.csv` a previous run wrote, back as a Table. Numbers are parsed back out of their
+    text so re-rendering a resumed run's markdown formats them like the rows scored this time."""
+    table = Table(Path(path).stem)
+    with Path(path).open(newline="") as handle:
+        for row in csv.DictReader(handle):
+            table.add({k: _typed(v) for k, v in row.items() if k is not None})
+    return table
+
+
+def read_tables(out_dir: Path) -> dict:
+    """Every table already in `out_dir`, by metric name — what a resumed run starts from."""
+    return {p.stem: read_table(p) for p in sorted(Path(out_dir).glob("*.csv"))}
+
+
+def _typed(text: str):
+    if text is None or text == "":
+        return ""
+    try:
+        return int(text)
+    except ValueError:
+        pass
+    try:
+        return float(text)  # "nan" and "inf" included, as the metrics report them
+    except ValueError:
+        return text
+
+
 def _fmt(value, precision: int) -> str:
     if isinstance(value, float):
         return f"{value:.{precision}f}" if 1e-3 <= abs(value) < 1e6 or value == 0 \

@@ -130,39 +130,71 @@ def frame_gaps(targets, filters: dict = None) -> list[FrameGap]:
     return out
 
 
+LABEL_COLUMNS = ("Asset", "Method", "Traj", "Illumination", "Soil", "Reflectivity")
+
+
+def case_key(row: dict) -> tuple:
+    """What identifies a case across runs: its label columns, as text. Works on an `EvalCase`'s
+    `label` and on a row read back from a `.csv`, so a resumed run can tell what it already has —
+    a column the case does not use is absent in one and blank in the other, and both read ""."""
+    return tuple(str(row.get(column, "") or "") for column in LABEL_COLUMNS)
+
+
 def evaluate(targets, metric_names=None, align_mode: str = "sim3", overrides: dict = None,
-             filters: dict = None, on_event=None) -> Results:
+             filters: dict = None, on_event=None, after_case=None, resume: dict = None) -> Results:
     """Score every variant of every target with every metric.
 
     `overrides` maps a metric name to `{option: "value as text"}` (the CLI's `--set`).
-    `on_event(kind, message)` is called with progress ("case", "metric", "skip", "error").
+    `on_event(kind, message, **info)` is called with progress ("plan", "case", "metric", "skip",
+    "error", "done"). Every case is enumerated before any scoring starts, so "plan" carries the
+    `total` and each "case" carries `index`/`total` — enough to draw a progress bar.
+    `after_case(results)` is handed the results so far after each case, so a caller can persist
+    them as the run goes instead of only at the end.
+    `resume` is a previous run's `{metric: Table}` (see `report.read_tables`): those rows are
+    carried into this run's tables and the cases they cover are not scored again. Rows are only
+    written once a case has been through every metric, so a case present in any table is one that
+    finished — which makes "everything up to the last completed case" exactly what is skipped.
     """
     names = list(metric_names or metrics_pkg.REGISTRY)
     chosen = [metrics_pkg.get(n) for n in names]
     options = {m.name: metrics_pkg.apply_overrides(m.default_options(),
                                                    (overrides or {}).get(m.name, {}))
                for m in chosen}
-    tables = {m.name: Table(m.name) for m in chosen}
+    tables = {m.name: (resume or {}).get(m.name) or Table(m.name) for m in chosen}
+    done = {case_key(row) for table in tables.values() for row in table.rows}
     skips = []
-    say = on_event or (lambda kind, message: None)
+    results = Results(tables, skips)
+    say = on_event or (lambda kind, message, **info: None)
 
-    for target in targets:
-        for variant in variants(target, **(filters or {})):
-            case = EvalCase(target.dataset, target.method, variant, align_mode)
-            say("case", f"{target.dataset.root.name} / {target.method} / {variant}")
-            for metric in chosen:
-                missing = case.missing(metric.needs)
-                if missing:
-                    skips.append(Skip(case, metric.name, f"no {', '.join(missing)}"))
-                    say("skip", f"  {metric.name}: skipped (no {', '.join(missing)})")
-                    continue
-                try:
-                    row = metric.fn(case, options[metric.name])
-                except Exception as exc:  # one bad variant must not sink the whole run
-                    skips.append(Skip(case, metric.name, f"{type(exc).__name__}: {exc}"))
-                    say("error", f"  {metric.name}: failed ({type(exc).__name__}: {exc})")
-                    continue
-                tables[metric.name].add({**case.label, **row})
-                say("metric", f"  {metric.name}: ok")
+    plan = [(t, v) for t in targets for v in variants(t, **(filters or {}))]
+    total = len(plan)
+    say("plan", f"{total} case(s) x {len(chosen)} metric(s)"
+                + (f", {len(done)} already scored" if done else ""),
+        total=total, metrics=names, done=len(done))
 
-    return Results(tables, skips)
+    for index, (target, variant) in enumerate(plan, 1):
+        case = EvalCase(target.dataset, target.method, variant, align_mode)
+        say("case", f"{target.dataset.root.name} / {target.method} / {variant}",
+            index=index, total=total)
+        if case_key(case.label) in done:
+            say("resumed", "  already scored, kept from the previous run")
+            continue
+        for metric in chosen:
+            missing = case.missing(metric.needs)
+            if missing:
+                skips.append(Skip(case, metric.name, f"no {', '.join(missing)}"))
+                say("skip", f"  {metric.name}: skipped (no {', '.join(missing)})")
+                continue
+            try:
+                row = metric.fn(case, options[metric.name])
+            except Exception as exc:  # one bad variant must not sink the whole run
+                skips.append(Skip(case, metric.name, f"{type(exc).__name__}: {exc}"))
+                say("error", f"  {metric.name}: failed ({type(exc).__name__}: {exc})")
+                continue
+            tables[metric.name].add({**case.label, **row})
+            say("metric", f"  {metric.name}: ok")
+        if after_case:
+            after_case(results)
+    say("done", f"{total} case(s) scored", index=total, total=total)
+
+    return results
