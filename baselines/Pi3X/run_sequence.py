@@ -14,13 +14,13 @@ head), though this baseline still only fixes gt's position/orientation, not scal
 _gt_frame0_alignment.
 
 Usage -- inside the container (build_container.sh once, then run_container.sh for a shell):
-    python run_sequence.py ../configs/pi3x/pi3x-example-config.yaml
+    python run_sequence.py --data ../configs/data/old_house.yaml --model ../configs/pi3x.yaml
+    python run_sequence.py ../configs/pi3x/pi3x-example-config.yaml   # both halves in one file
 
-Paths are the same inside the container as on the host, so an absolute config path works too.
+Paths are the same inside the container as on the host, so absolute config paths work too.
 Do not run this outside the container: it needs the image's torch/pi3 install.
 """
 
-import argparse
 import dataclasses
 import math
 import sys
@@ -33,16 +33,13 @@ import trimesh
 from PIL import Image
 from torchvision import transforms
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root: inspection_viz + baselines.common
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root: inspection_viz + baselines
 
-from baselines.common.config import DatasetSelection, OutputSpec, load_config
-from baselines.common.writer import (
-    cloud_path, frame_stem, output_dirs, write_cam, write_cloud, write_depth,
-)
-from inspection_viz.dataset import AssetDataset, Frame
+from baselines.common.runner import Baseline, SequenceOutput, cli_main
+from inspection_viz.dataset import Frame
 from inspection_viz.io import image_size
 
-from pi3.models.pi3x import Pi3X
+from pi3.models.pi3x import Pi3X as Pi3XModel  # aliased: the Baseline below owns the name
 from pi3.pipe.pi3x_vo import Pi3XVO
 from pi3.utils.geometry import recover_intrinsic_from_rays_d
 
@@ -66,13 +63,6 @@ class ModelConfig:
     # align consecutive chunks against -- separate from output.min_confidence below, which is our
     # own point-cloud export filter applied after the fact.
     conf_thre: float = 0.05
-
-
-@dataclasses.dataclass
-class Config:
-    dataset: DatasetSelection = dataclasses.field(default_factory=DatasetSelection)
-    model: ModelConfig = dataclasses.field(default_factory=ModelConfig)
-    output: OutputSpec = dataclasses.field(default_factory=OutputSpec)
 
 
 def _gt_frame0_alignment(c2ws: np.ndarray, gt_c2w0: np.ndarray) -> np.ndarray:
@@ -129,10 +119,10 @@ def load_frames_as_tensor(frames: list[Frame], pixel_limit: int) -> torch.Tensor
     return torch.stack(tensors, dim=0)
 
 
-def load_pi3x_model(cfg: ModelConfig) -> Pi3X:
+def load_pi3x_model(cfg: ModelConfig) -> Pi3XModel:
     if cfg.ckpt is None:
-        return Pi3X.from_pretrained(cfg.hf_repo)
-    model = Pi3X()
+        return Pi3XModel.from_pretrained(cfg.hf_repo)
+    model = Pi3XModel()
     if cfg.ckpt.endswith(".safetensors"):
         from safetensors.torch import load_file
         weight = load_file(cfg.ckpt)
@@ -142,7 +132,7 @@ def load_pi3x_model(cfg: ModelConfig) -> Pi3X:
     return model
 
 
-def run_inference(model: Pi3X, frames: list[Frame], cfg: ModelConfig) -> dict:
+def run_inference(model: Pi3XModel, frames: list[Frame], cfg: ModelConfig) -> dict:
     """Runs the whole sequence through Pi3XVO's own chunk/align/stitch pipeline (see module
     docstring) -- it manages its own torch.no_grad()/autocast internally, so this doesn't need to.
 
@@ -187,71 +177,61 @@ def run_inference(model: Pi3X, frames: list[Frame], cfg: ModelConfig) -> dict:
     }
 
 
-def main():
-    p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("config", help="path to a run config yaml, e.g. ../configs/pi3x/pi3x-example-config.yaml")
-    args = p.parse_args()
-    cfg = load_config(args.config, Config)
+class Pi3X(Baseline):
+    """Pi3X, driven through its own chunked VO pipeline (see module docstring)."""
 
-    ds = AssetDataset(cfg.dataset.root)
-    variant = cfg.dataset.variant()
-    frames = cfg.dataset.select(ds.sequence(variant))  # gt sequence: rgb input
-    if not frames:
-        raise SystemExit(f"no frames selected for {variant} in {cfg.dataset.root}")
+    name = "pi3x"
+    Config = ModelConfig
 
-    depth_dir, cam_dir = output_dirs(ds.root, ds.layout, cfg.output.method, variant.as_dict())
-    ply_path = cloud_path(ds.root, ds.layout, cfg.output.method, variant.as_dict())
-    if not cfg.output.overwrite and depth_dir.exists() and any(depth_dir.iterdir()):
-        raise SystemExit(f"{depth_dir} already has output; set output.overwrite: true to replace")
+    def setup(self) -> None:
+        cfg = self.config
+        print(f"loading Pi3X on {cfg.device} ...")
+        self.model = load_pi3x_model(cfg)
+        self.model.eval().to(cfg.device)
 
-    print(f"loading Pi3X on {cfg.model.device} ...")
-    model = load_pi3x_model(cfg.model)
-    model.eval().to(cfg.model.device)
+    def run(self, frames: list[Frame], out: SequenceOutput) -> None:
+        cfg = self.config
+        print(f"running {len(frames)} frames (chunk_size={cfg.chunk_size}, overlap={cfg.overlap}) ...")
+        predictions = run_inference(self.model, frames, cfg)
+        for key, val in predictions.items():
+            predictions[key] = val.float().cpu().numpy()
 
-    print(f"running {len(frames)} frames (chunk_size={cfg.model.chunk_size}, overlap={cfg.model.overlap}) ...")
-    predictions = run_inference(model, frames, cfg.model)
-    for key, val in predictions.items():
-        predictions[key] = val.float().cpu().numpy()
+        # Pi3X's own processing (width, height) -- see load_frames_as_tensor -- as opposed to each
+        # frame's original size below.
+        proc_image_size = (predictions["images"].shape[-1], predictions["images"].shape[-2])
+        c2ws = predictions["camera_poses"]  # Pi3X predicts camera-to-world directly, OpenCV convention
+        align = _gt_frame0_alignment(c2ws, frames[0].camera().c2w)  # one rigid transform for the run
+        c2ws = align @ c2ws
+        conf = predictions["conf"]  # already a probability -- Pi3XVO applies sigmoid itself, unlike plain Pi3
 
-    # Pi3X's own processing (width, height) -- see load_frames_as_tensor -- as opposed to each
-    # frame's original size below.
-    proc_image_size = (predictions["images"].shape[-1], predictions["images"].shape[-2])
-    c2ws = predictions["camera_poses"]  # Pi3X predicts camera-to-world directly, OpenCV convention
-    align = _gt_frame0_alignment(c2ws, frames[0].camera().c2w)  # one rigid transform for the run
-    c2ws = align @ c2ws
-    conf = predictions["conf"]  # already a probability -- Pi3XVO applies sigmoid itself, unlike plain Pi3
+        if out.spec.cloud:
+            # Pi3X hands back world-space points directly (camera_poses already applied), in its
+            # own world gauge -- align moves them onto the gt one, same as it moves the poses.
+            world_pts = trimesh.transform_points(predictions["points"].reshape(-1, 3), align)
+            cols = predictions["images"].transpose(0, 2, 3, 1).reshape(-1, 3)  # (S,3,h,w) -> (S*h*w,3), [0,1]
+            cols = (cols * 255).clip(0, 255).astype(np.uint8)
+            cloud_mask = np.isfinite(world_pts).all(axis=1)
+            if out.spec.min_confidence is not None:
+                # A percentile (0-100) of lowest-confidence points to drop, not an absolute cutoff
+                # -- matches baselines/vggt/run_sequence.py's own point-cloud confidence filter
+                # (percentile relative to this run's own conf distribution, since raw confidence
+                # isn't comparable across runs/models the way an absolute probability is). Only
+                # ever filters the cloud, not per-pixel depth (unlike SequenceOutput.write_frame's
+                # own min_confidence, which is an absolute cutoff -- not used here).
+                confs = conf.reshape(-1)
+                conf_thresh_absolute = np.percentile(confs, out.spec.min_confidence)
+                cloud_mask &= (confs >= conf_thresh_absolute) & (confs >= 1e-5)
 
-    if cfg.output.cloud:
-        # Pi3X hands back world-space points directly (camera_poses already applied), in its own
-        # world gauge -- align moves them onto the gt one, same as it moves the poses.
-        world_pts = trimesh.transform_points(predictions["points"].reshape(-1, 3), align)
-        cols = predictions["images"].transpose(0, 2, 3, 1).reshape(-1, 3)  # (S, 3, h, w) -> (S*h*w, 3), [0,1]
-        cols = (cols * 255).clip(0, 255).astype(np.uint8)
-        cloud_mask = np.isfinite(world_pts).all(axis=1)
-        if cfg.output.min_confidence is not None:
-            # min_confidence here is a percentile (0-100) of lowest-confidence points to drop, not
-            # an absolute cutoff -- matches baselines/vggt/run_sequence.py's own point-cloud
-            # confidence filter (percentile relative to this run's own conf distribution, since raw
-            # confidence isn't comparable across runs/models the way an absolute probability is).
-            confs = conf.reshape(-1)
-            conf_thresh_absolute = np.percentile(confs, cfg.output.min_confidence)
-            cloud_mask &= (confs >= conf_thresh_absolute) & (confs >= 1e-5)
+        for j, f in enumerate(frames):
+            width, height = image_size(f.rgb_path)
+            depth = cv2.resize(predictions["depth"][j], (width, height), interpolation=cv2.INTER_LINEAR)
+            K = rescale_pi3x_intrinsics_from_K(predictions["intrinsic"][j], (width, height), proc_image_size)
+            out.write_frame(f.index, depth, c2ws[j], K, intrinsics_width=width)
 
-    for j, f in enumerate(frames):
-        width, height = image_size(f.rgb_path)
-        depth = cv2.resize(predictions["depth"][j], (width, height), interpolation=cv2.INTER_LINEAR)
-        K = rescale_pi3x_intrinsics_from_K(predictions["intrinsic"][j], (width, height), proc_image_size)
-        stem = frame_stem(f.index)
-        write_depth(depth_dir / f"{stem}.exr", depth)
-        write_cam(cam_dir / f"{stem}.json", c2ws[j], K, width=width)
-    print(f"  wrote frames {frames[0].index}..{frames[-1].index}")
-
-    if cfg.output.cloud:
-        write_cloud(ply_path, world_pts[cloud_mask], cols[cloud_mask])
-        print(f"  wrote {cloud_mask.sum():,} points -> {ply_path.relative_to(ds.root)}")
-
-    print(f"done: predictions/{cfg.output.method}/ under {ds.root}")
+        if out.spec.cloud:
+            out.write_cloud(world_pts[cloud_mask], cols[cloud_mask])
+            print(f"  wrote {cloud_mask.sum():,} points -> {out.cloud_path.relative_to(out.root)}")
 
 
 if __name__ == "__main__":
-    main()
+    cli_main(Pi3X, description=__doc__)

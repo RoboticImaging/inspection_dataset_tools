@@ -27,11 +27,17 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # own venv (not the system python) so it can't collide with Debian-managed dist-packages
 # (add-apt-repository itself pulls in distutils-installed python3-* packages). curl is for
 # ensure_weights_downloaded's own curl-based downloads (run_sequence.py, not at build time).
+# build-essential is for a C compiler -- da3_streaming's default Model.align_lib: 'triton' JIT-
+# compiles a small kernel at runtime (triton/runtime/build.py) and fails with "Failed to find C
+# compiler" without one; the plain depth_anything_3 baseline doesn't need this since it never
+# invokes triton. python3.11-dev is for that same compile step -- deadsnakes' python3.11/
+# python3.11-venv packages don't carry Python.h themselves, and triton's generated cuda_utils.c
+# does `#include <Python.h>`.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         software-properties-common \
     && add-apt-repository -y ppa:deadsnakes/ppa \
     && apt-get update && apt-get install -y --no-install-recommends \
-        python3.11 python3.11-venv git curl \
+        python3.11 python3.11-venv python3.11-dev git curl build-essential \
         libgl1 libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/* \
     && python3.11 -m venv /opt/venv

@@ -9,13 +9,13 @@ Its own CLI (`vggt_long.py`) resolves weight paths (e.g. `./weights/model.pt`) r
 isn't packaged to be imported as a library, so this drives it exactly as documented -- a
 subprocess, run from inside the VGGT-Long submodule -- then re-exports its outputs
 (camera_poses.txt/intrinsic.txt, the per-chunk depth VGGT-Long computes but normally deletes, and
-its own fused point cloud) into the shared predictions/{method}/{depths,cam_params,clouds}/...
-convention the other baselines use.
+its own fused point cloud) through baselines.common.runner's shared Baseline/SequenceOutput.
 
 Usage -- inside the container (build_container.sh once, then run_container.sh for a shell):
-    python run_sequence.py ../configs/vggt-long/vggt-long-example-config.yaml
+    python run_sequence.py --data ../configs/data/old_house.yaml --model ../configs/vggt_long.yaml
+    python run_sequence.py ../configs/vggt-long/vggt-long-example-config.yaml  # both halves in one file
 
-Paths are the same inside the container as on the host, so an absolute config path works too.
+Paths are the same inside the container as on the host, so absolute config paths work too.
 Do not run this outside the container: it needs the image's torch/vggt-long install. Weights
 aren't baked into the image (see the Dockerfile's own note); the first run that needs a given
 checkpoint instead downloads just that one itself (ensure_weights_downloaded, below -- the same
@@ -24,7 +24,6 @@ config's chosen model/loop backend actually needs), cached under VGGT-Long/weigh
 after.
 """
 
-import argparse
 import dataclasses
 import shutil
 import subprocess
@@ -38,13 +37,10 @@ import numpy as np
 import trimesh
 import yaml
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root: inspection_viz + baselines.common
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root: inspection_viz + baselines
 
-from baselines.common.config import DatasetSelection, OutputSpec, load_config
-from baselines.common.writer import (
-    cloud_path, frame_stem, output_dirs, write_cam, write_cloud, write_depth,
-)
-from inspection_viz.dataset import AssetDataset, Frame
+from baselines.common.runner import Baseline, SequenceOutput, cli_main
+from inspection_viz.dataset import Frame
 from inspection_viz.io import image_size
 
 # The submodule (its own vggt_long.py/loop_utils/base_models/...), as opposed to this directory
@@ -59,13 +55,6 @@ class ModelConfig:
     # not given as absolute. Every VGGT-Long-specific knob (which foundation model, chunk_size,
     # overlap, loop closure, ...) lives there, not here -- this runner only adds dataset/output.
     config: str = "configs/base_config.yaml"
-
-
-@dataclasses.dataclass
-class Config:
-    dataset: DatasetSelection = dataclasses.field(default_factory=DatasetSelection)
-    model: ModelConfig = dataclasses.field(default_factory=ModelConfig)
-    output: OutputSpec = dataclasses.field(default_factory=OutputSpec)
 
 
 def _gt_frame0_alignment(c2ws: np.ndarray, gt_c2w0: np.ndarray) -> np.ndarray:
@@ -102,17 +91,17 @@ def rescale_vggt_intrinsics_from_K(K_pred: np.ndarray, orig_image_size: tuple[in
 
 
 def stage_frames(frames: list[Frame], staging_dir: Path) -> None:
-    """Symlinks `frames`' rgb into `staging_dir`, named f"{frame_stem(index)}.jpg" -- so
-    vggt_long.py's own `sorted(glob("*.jpg") + glob("*.png"))` image loading (VGGT_Long.run)
-    processes exactly our selected frames, in the same order `frames` is already in (frame_stem's
-    zero-padding sorts the same way), letting us map its 0..N-1 frame index straight back to
-    `frames[i]` afterward. Always ".jpg" regardless of the source's real extension: the glob only
-    matches "*.jpg"/"*.png" (not e.g. ".jpeg"), but images are decoded by content, not filename,
-    so a mislabeled extension here is harmless.
+    """Symlinks `frames`' rgb into `staging_dir`, named f"{i:08d}.jpg" (`i` = position in
+    `frames`) -- so vggt_long.py's own `sorted(glob("*.jpg") + glob("*.png"))` image loading
+    (VGGT_Long.run) processes exactly our selected frames, in the same order `frames` is already
+    in, letting us map its 0..N-1 frame index straight back to `frames[i]` afterward. Always
+    ".jpg" regardless of the source's real extension: the glob only matches "*.jpg"/"*.png" (not
+    e.g. ".jpeg"), but images are decoded by content, not filename, so a mislabeled extension
+    here is harmless.
     """
     staging_dir.mkdir(parents=True, exist_ok=True)
-    for f in frames:
-        (staging_dir / f"{frame_stem(f.index)}.jpg").symlink_to(f.rgb_path)
+    for i, f in enumerate(frames):
+        (staging_dir / f"{i:08d}.jpg").symlink_to(f.rgb_path)
 
 
 def prepare_vggt_long_config(model_config_path: Path, out_dir: Path) -> Path:
@@ -190,8 +179,8 @@ def _download_map(dest: Path) -> None:
 
 @dataclasses.dataclass
 class _WeightSpec:
-    download: object  # Callable[[Path], None]
-    top_level: str     # file/dir _download produces directly under its given scratch dir
+    download: Callable[[Path], None]
+    top_level: str  # file/dir `download` produces directly under its given scratch dir
 
 
 _WEIGHT_SPECS: dict[str, _WeightSpec] = {
@@ -329,90 +318,75 @@ def load_chunk_depths(aligned_dir: Path, chunk_indices: list[tuple[int, int]],
     return np.stack(depths_by_frame), proc_size
 
 
-def main():
-    p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("config", help="path to a run config yaml, e.g. ../configs/vggt-long/vggt-long-example-config.yaml")
-    args = p.parse_args()
-    cfg = load_config(args.config, Config)
+class VGGTLong(Baseline):
+    """VGGT-Long, driven through its own chunked/loop-closed CLI (see module docstring)."""
 
-    ds = AssetDataset(cfg.dataset.root)
-    variant = cfg.dataset.variant()
-    frames = cfg.dataset.select(ds.sequence(variant))  # gt sequence: rgb input
-    if not frames:
-        raise SystemExit(f"no frames selected for {variant} in {cfg.dataset.root}")
+    name = "vggt-long"
+    Config = ModelConfig
 
-    depth_dir, cam_dir = output_dirs(ds.root, ds.layout, cfg.output.method, variant.as_dict())
-    ply_path = cloud_path(ds.root, ds.layout, cfg.output.method, variant.as_dict())
-    if not cfg.output.overwrite and depth_dir.exists() and any(depth_dir.iterdir()):
-        raise SystemExit(f"{depth_dir} already has output; set output.overwrite: true to replace")
+    def setup(self) -> None:
+        self.model_config_path = Path(self.config.config)
+        if not self.model_config_path.is_absolute():
+            self.model_config_path = VGGT_LONG_ROOT / self.model_config_path
+        if not self.model_config_path.is_file():
+            raise SystemExit(f"model.config {self.model_config_path} not found")
+        ensure_weights_downloaded(self.model_config_path)
 
-    model_config_path = Path(cfg.model.config)
-    if not model_config_path.is_absolute():
-        model_config_path = VGGT_LONG_ROOT / model_config_path
-    if not model_config_path.is_file():
-        raise SystemExit(f"model.config {model_config_path} not found")
+    def run(self, frames: list[Frame], out: SequenceOutput) -> None:
+        with tempfile.TemporaryDirectory(prefix="vggt-long-") as tmp:
+            tmp_path = Path(tmp)
+            staging_dir = tmp_path / "frames"
+            stage_frames(frames, staging_dir)
+            run_config_path = prepare_vggt_long_config(self.model_config_path, tmp_path)
 
-    ensure_weights_downloaded(model_config_path)
+            print(f"running VGGT-Long on {len(frames)} frames (chunked, see {self.model_config_path.name}) ...")
+            exp_dir = run_vggt_long(staging_dir, run_config_path)
 
-    with tempfile.TemporaryDirectory(prefix="vggt-long-") as tmp:
-        tmp_path = Path(tmp)
-        staging_dir = tmp_path / "frames"
-        stage_frames(frames, staging_dir)
-        run_config_path = prepare_vggt_long_config(model_config_path, tmp_path)
-
-        print(f"running VGGT-Long on {len(frames)} frames (chunked, see {model_config_path.name}) ...")
-        exp_dir = run_vggt_long(staging_dir, run_config_path)
-
-        try:
-            run_config = yaml.safe_load(run_config_path.read_text())
-            chunk_indices = compute_chunk_indices(
-                len(frames), run_config["Model"]["chunk_size"], run_config["Model"]["overlap"]
-            )
-
-            c2ws = read_camera_poses(exp_dir / "camera_poses.txt", len(frames))
-            intrinsics_path = exp_dir / "intrinsic.txt"
-            if not intrinsics_path.is_file():
-                raise SystemExit(
-                    f"{intrinsics_path} wasn't written -- model.config's Weights.model doesn't "
-                    "produce intrinsics itself (only the VGGT adapter does; Pi3/Mapanything "
-                    "return intrinsic=None, see VGGT-Long/base_models/base_model.py)"
+            try:
+                run_config = yaml.safe_load(run_config_path.read_text())
+                chunk_indices = compute_chunk_indices(
+                    len(frames), run_config["Model"]["chunk_size"], run_config["Model"]["overlap"]
                 )
-            Ks_proc = read_intrinsics(intrinsics_path, len(frames))
-            depths_proc, proc_image_size = load_chunk_depths(
-                exp_dir / "_tmp_results_aligned", chunk_indices, len(frames)
-            )
 
-            align = _gt_frame0_alignment(c2ws, frames[0].camera().c2w)  # one rigid transform for the run
-            c2ws = align @ c2ws
+                c2ws = read_camera_poses(exp_dir / "camera_poses.txt", len(frames))
+                intrinsics_path = exp_dir / "intrinsic.txt"
+                if not intrinsics_path.is_file():
+                    raise SystemExit(
+                        f"{intrinsics_path} wasn't written -- model.config's Weights.model doesn't "
+                        "produce intrinsics itself (only the VGGT adapter does; Pi3/Mapanything "
+                        "return intrinsic=None, see VGGT-Long/base_models/base_model.py)"
+                    )
+                Ks_proc = read_intrinsics(intrinsics_path, len(frames))
+                depths_proc, proc_image_size = load_chunk_depths(
+                    exp_dir / "_tmp_results_aligned", chunk_indices, len(frames)
+                )
 
-            for j, f in enumerate(frames):
-                width, height = image_size(f.rgb_path)
-                depth = cv2.resize(depths_proc[j], (width, height), interpolation=cv2.INTER_LINEAR)
-                K = rescale_vggt_intrinsics_from_K(Ks_proc[j], (width, height), proc_image_size)
-                stem = frame_stem(f.index)
-                write_depth(depth_dir / f"{stem}.exr", depth)
-                write_cam(cam_dir / f"{stem}.json", c2ws[j], K, width=width)
-            print(f"  wrote frames {frames[0].index}..{frames[-1].index}")
+                align = _gt_frame0_alignment(c2ws, frames[0].camera().c2w)  # one rigid transform for the run
+                c2ws = align @ c2ws
 
-            if cfg.output.cloud:
-                # VGGT-Long's own fused, already confidence-filtered/subsampled cloud (its
-                # Model.Pointcloud_Save settings) -- reused as-is rather than re-unprojecting
-                # ourselves, same "matches what the model ships as its reference output"
-                # rationale as OutputSpec.cloud.
-                cloud = trimesh.load(exp_dir / "pcd" / "combined_pcd.ply", process=False)
-                pts = trimesh.transform_points(np.asarray(cloud.vertices), align)
-                cols = np.asarray(cloud.colors)[:, :3] if cloud.colors is not None else None
-                write_cloud(ply_path, pts, cols)
-                print(f"  wrote {len(pts):,} points -> {ply_path.relative_to(ds.root)}")
-        finally:
-            # VGGT-Long's own exp dir (per-chunk depth kept alive by prepare_vggt_long_config,
-            # plus per-chunk .ply files) is a bulky scratch intermediate now fully harvested into
-            # the predictions/ tree above -- nothing downstream reads it, same rationale as
-            # baselines/depth_anything_3/run_sequence.py's glb cleanup.
-            shutil.rmtree(exp_dir.parent, ignore_errors=True)
+                for j, f in enumerate(frames):
+                    width, height = image_size(f.rgb_path)
+                    depth = cv2.resize(depths_proc[j], (width, height), interpolation=cv2.INTER_LINEAR)
+                    K = rescale_vggt_intrinsics_from_K(Ks_proc[j], (width, height), proc_image_size)
+                    out.write_frame(f.index, depth, c2ws[j], K, intrinsics_width=width)
 
-    print(f"done: predictions/{cfg.output.method}/ under {ds.root}")
+                if out.spec.cloud:
+                    # VGGT-Long's own fused, already confidence-filtered/subsampled cloud (its
+                    # Model.Pointcloud_Save settings) -- reused as-is rather than re-unprojecting
+                    # ourselves, same "matches what the model ships as its reference output"
+                    # rationale as OutputSpec.cloud.
+                    cloud = trimesh.load(exp_dir / "pcd" / "combined_pcd.ply", process=False)
+                    pts = trimesh.transform_points(np.asarray(cloud.vertices), align)
+                    cols = np.asarray(cloud.colors)[:, :3] if cloud.colors is not None else None
+                    out.write_cloud(pts, cols)
+                    print(f"  wrote {len(pts):,} points -> {out.cloud_path.relative_to(out.root)}")
+            finally:
+                # VGGT-Long's own exp dir (per-chunk depth kept alive by prepare_vggt_long_config,
+                # plus per-chunk .ply files) is a bulky scratch intermediate now fully harvested
+                # into the predictions/ tree above -- nothing downstream reads it, same rationale
+                # as baselines/depth_anything_3/run_sequence.py's glb cleanup.
+                shutil.rmtree(exp_dir.parent, ignore_errors=True)
 
 
 if __name__ == "__main__":
-    main()
+    cli_main(VGGTLong, description=__doc__)

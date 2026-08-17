@@ -1,5 +1,10 @@
-# Example config for baselines/vggt-slam/run_sequence.py.
+# Example config for baselines/VGGT-SLAM/run_sequence.py.
 # Every field has a default in run_sequence.py's Config dataclasses; only override what you need.
+#
+# run:/vis: live *under* model: here (not top-level) -- baselines.common.runner's RunConfig only
+# recognizes `model:`/`output:` at the top level of a baseline config; run_sequence.py's own
+# ModelConfig nests RunConfig/VisConfig as `model.run`/`model.vis` to keep them as their own
+# section instead of flattening every field directly under model:.
 
 dataset:
   root: /home/jgray/eccv_2026_data/old_house/     # asset folder, e.g. path to glass_house
@@ -10,26 +15,30 @@ dataset:
   frame_end: null              # null = to the end
   frame_stride: 1
 
-vis:
-  vis_map: False 
-  vis_imgs: False 
-  vis_voxel_size: null 
-  vis_flow: False 
+model:
+  checkpoint_url: https://huggingface.co/facebook/VGGT-1B/resolve/main/model.pt
 
-run:
-  min_disparity: 50
-  conf_threshold: 50.0
-  lc_thres: 0.95
-  run_os: False 
-  submap_size: 16
-  overlapping_window_size: 1
-  max_loops: 1 
+  vis:
+    vis_map: False
+    vis_imgs: False
+    vis_voxel_size: null
+    vis_flow: False
+
+  run:
+    min_disparity: 50
+    conf_threshold: 50.0
+    lc_thres: 0.95
+    run_os: False
+    submap_size: 16
+    overlapping_window_size: 1
+    max_loops: 1
 
 output:
   # -> predictions/vggt-slam/{illumination}/{depths,cam_params}/soil={soil},traj={traj}/
   #    predictions/vggt-slam/{illumination}/clouds/soil={soil},traj={traj}.ply
   # (keyed by the full variant, so runs on different illumination/soil never overwrite each other)
-  method: vggt-slam      # also the viewer's Source label
+  method: null            # null = the baseline's registered name ("vggt-slam"); set it to run
+                           # two configurations of the same baseline side by side
   overwrite: true
-  min_confidence: null   # unused here -- point-cloud confidence filtering is run.conf_threshold, applied inside the SLAM backend itself
-  cloud: true             # fused .ply, unprojected from predicted depth + poses
+  min_confidence: null    # unused here -- point-cloud confidence filtering is model.run.conf_threshold, applied inside the SLAM backend itself
+  cloud: true              # fused .ply, unprojected from predicted depth + poses

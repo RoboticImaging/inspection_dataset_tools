@@ -7,13 +7,13 @@ pipeline — one joint inference call over the whole given sequence, same shape 
 baselines/depth_anything_3/run_sequence.py.
 
 Usage — inside the container (build_container.sh once, then run_container.sh for a shell):
-    python run_sequence.py ../configs/vggt_glass_house.yaml
+    python run_sequence.py --data ../configs/data/old_house.yaml --model ../configs/vggt.yaml
+    python run_sequence.py ../configs/vggt_glass_house.yaml      # both halves in one file
 
-Paths are the same inside the container as on the host, so an absolute config path works too.
+Paths are the same inside the container as on the host, so absolute config paths work too.
 Do not run this outside the container: it needs the image's torch/vggt install.
 """
 
-import argparse
 import dataclasses
 import sys
 from pathlib import Path
@@ -23,16 +23,13 @@ import numpy as np
 import torch
 import trimesh
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root: inspection_viz + baselines.common
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root: inspection_viz + baselines
 
-from baselines.common.config import DatasetSelection, OutputSpec, load_config
-from baselines.common.writer import (
-    cloud_path, frame_stem, output_dirs, write_cam, write_cloud, write_depth,
-)
-from inspection_viz.dataset import AssetDataset, Frame
+from baselines.common.runner import Baseline, SequenceOutput, cli_main
+from inspection_viz.dataset import Frame
 from inspection_viz.io import image_size
 
-from vggt.models.vggt import VGGT
+from vggt.models.vggt import VGGT as VGGTModel  # aliased: the Baseline below owns the name
 from vggt.utils.geometry import unproject_depth_map_to_point_map
 from vggt.utils.load_fn import load_and_preprocess_images
 from vggt.utils.pose_enc import pose_encoding_to_extri_intri
@@ -42,13 +39,6 @@ from vggt.utils.pose_enc import pose_encoding_to_extri_intri
 class ModelConfig:
     device: str = "cuda"
     checkpoint_url: str = "https://huggingface.co/facebook/VGGT-1B/resolve/main/model.pt"
-
-
-@dataclasses.dataclass
-class Config:
-    dataset: DatasetSelection = dataclasses.field(default_factory=DatasetSelection)
-    model: ModelConfig = dataclasses.field(default_factory=ModelConfig)
-    output: OutputSpec = dataclasses.field(default_factory=OutputSpec)
 
 
 def _w2c_to_c2w(w2c: np.ndarray) -> np.ndarray:
@@ -99,7 +89,7 @@ def rescale_vggt_intrinsics_from_K(K_pred: np.ndarray, orig_image_size: tuple[in
     return K_orig
 
 
-def run_inference(model: VGGT, frames: list[Frame], device: str) -> dict:
+def run_inference(model: VGGTModel, frames: list[Frame], device: str) -> dict:
     """One joint feed-forward call over the whole sequence -- VGGT reasons across all given
     frames at once, which is the only way its poses/depths come out mutually consistent. Long
     sequences will simply run out of GPU memory; there is no chunking fallback, because
@@ -121,79 +111,61 @@ def run_inference(model: VGGT, frames: list[Frame], device: str) -> dict:
     return predictions
 
 
-def main():
-    p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("config", help="path to a run config yaml, e.g. ../configs/vggt_glass_house.yaml")
-    args = p.parse_args()
-    cfg = load_config(args.config, Config)
+class VGGT(Baseline):
+    """Plain feed-forward VGGT, one joint inference call per sequence."""
 
-    ds = AssetDataset(cfg.dataset.root)
-    variant = cfg.dataset.variant()
-    frames = cfg.dataset.select(ds.sequence(variant))  # gt sequence: rgb input
-    if not frames:
-        raise SystemExit(f"no frames selected for {variant} in {cfg.dataset.root}")
+    name = "vggt"
+    Config = ModelConfig
 
-    depth_dir, cam_dir = output_dirs(ds.root, ds.layout, cfg.output.method, variant.as_dict())
-    ply_path = cloud_path(ds.root, ds.layout, cfg.output.method, variant.as_dict())
-    if not cfg.output.overwrite and depth_dir.exists() and any(depth_dir.iterdir()):
-        raise SystemExit(f"{depth_dir} already has output; set output.overwrite: true to replace")
+    def setup(self) -> None:
+        cfg = self.config
+        print(f"loading VGGT on {cfg.device} ...")
+        self.model = VGGTModel()
+        self.model.load_state_dict(torch.hub.load_state_dict_from_url(cfg.checkpoint_url))
+        self.model.eval().to(cfg.device)
 
-    print(f"loading VGGT on {cfg.model.device} ...")
-    model = VGGT()
-    model.load_state_dict(torch.hub.load_state_dict_from_url(cfg.model.checkpoint_url))
-    model.eval().to(cfg.model.device)
+    def run(self, frames: list[Frame], out: SequenceOutput) -> None:
+        predictions = run_inference(self.model, frames, self.config.device)
 
-    print(f"running {len(frames)} frames in a single inference call")
-    predictions = run_inference(model, frames, cfg.model.device)
+        # VGGT's own processing (width, height) -- see load_and_preprocess_images -- as opposed to
+        # each frame's original size below.
+        proc_image_size = (predictions["images"].shape[-1], predictions["images"].shape[-2])
+        c2ws = np.stack([_w2c_to_c2w(predictions["extrinsic"][j]) for j in range(len(frames))])
+        align = _gt_frame0_alignment(c2ws, frames[0].camera().c2w)  # one rigid transform for the run
+        c2ws = align @ c2ws
 
-    # VGGT's own processing (width, height) -- see load_and_preprocess_images -- as opposed to
-    # each frame's original size below.
-    proc_image_size = (predictions["images"].shape[-1], predictions["images"].shape[-2])
-    c2ws = np.stack([_w2c_to_c2w(predictions["extrinsic"][j]) for j in range(len(frames))])
-    align = _gt_frame0_alignment(c2ws, frames[0].camera().c2w)  # one rigid transform for the run
-    c2ws = align @ c2ws
+        if out.spec.cloud:
+            # Unprojected once over the whole batch, at VGGT's own processing resolution -- each
+            # frame's extrinsic/intrinsic are only meaningful together at that resolution, before
+            # the per-frame depth gets resized back to its own original size below.
+            world_pts = unproject_depth_map_to_point_map(
+                predictions["depth"], predictions["extrinsic"], predictions["intrinsic"]
+            )  # (S, h, w, 3), VGGT's own world gauge
+            world_pts = trimesh.transform_points(world_pts.reshape(-1, 3), align)
+            cols = predictions["images"].transpose(0, 2, 3, 1).reshape(-1, 3)  # (S,3,h,w) -> (S*h*w,3), [0,1]
+            cols = (cols * 255).clip(0, 255).astype(np.uint8)
+            cloud_mask = np.isfinite(world_pts).all(axis=1)
 
-    if cfg.output.cloud:
-        # Unprojected once over the whole batch, at VGGT's own processing resolution -- each
-        # frame's extrinsic/intrinsic are only meaningful together at that resolution, before the
-        # per-frame depth gets resized back to its own original size below.
-        world_pts = unproject_depth_map_to_point_map(
-            predictions["depth"], predictions["extrinsic"], predictions["intrinsic"]
-        )  # (S, h, w, 3), VGGT's own world gauge
-        world_pts = trimesh.transform_points(world_pts.reshape(-1, 3), align)
-        cols = predictions["images"].transpose(0, 2, 3, 1).reshape(-1, 3)  # (S, 3, h, w) -> (S*h*w, 3), [0,1]
-        cols = (cols * 255).clip(0, 255).astype(np.uint8)
-        cloud_mask = np.isfinite(world_pts).all(axis=1)
-        
-        if cfg.output.min_confidence is not None:
-            conf_thresh_absolute = np.percentile(predictions['depth_conf'], cfg.output.min_confidence) 
-            confs = predictions['depth_conf'].reshape(-1)
-            conf_mask = (confs >= conf_thresh_absolute) & (confs >= 1e-5)
-            cloud_mask &= conf_mask 
-        
-        
-        
-        # if cfg.output.min_confidence is not None:
-        #     cloud_mask &= predictions["depth_conf"].reshape(-1) >= cfg.output.min_confidence
+            if out.spec.min_confidence is not None:
+                # A percentile (0-100) of lowest-confidence points to drop from the cloud, not an
+                # absolute cutoff -- raw confidence isn't comparable across runs/models the way an
+                # absolute probability is. This only ever filters the cloud, not per-pixel depth
+                # (unlike SequenceOutput.write_frame's own min_confidence, which is an absolute
+                # cutoff on depth -- not used here, so depth is never nan-masked by confidence).
+                confs = predictions["depth_conf"].reshape(-1)
+                conf_thresh_absolute = np.percentile(confs, out.spec.min_confidence)
+                cloud_mask &= (confs >= conf_thresh_absolute) & (confs >= 1e-5)
 
-    for j, f in enumerate(frames):
-        width, height = image_size(f.rgb_path)
-        depth = cv2.resize(predictions["depth"][j].squeeze(-1), (width, height), interpolation=cv2.INTER_LINEAR)
-        # if cfg.output.min_confidence is not None:
-        #     conf = cv2.resize(predictions["depth_conf"][j], (width, height), interpolation=cv2.INTER_LINEAR)
-        #     depth = np.where(conf >= cfg.output.min_confidence, depth, np.nan).astype(np.float32)
-        K = rescale_vggt_intrinsics_from_K(predictions["intrinsic"][j], (width, height), proc_image_size)
-        stem = frame_stem(f.index)
-        write_depth(depth_dir / f"{stem}.exr", depth)
-        write_cam(cam_dir / f"{stem}.json", c2ws[j], K, width=width)
-    print(f"  wrote frames {frames[0].index}..{frames[-1].index}")
+        for j, f in enumerate(frames):
+            width, height = image_size(f.rgb_path)
+            depth = cv2.resize(predictions["depth"][j].squeeze(-1), (width, height), interpolation=cv2.INTER_LINEAR)
+            K = rescale_vggt_intrinsics_from_K(predictions["intrinsic"][j], (width, height), proc_image_size)
+            out.write_frame(f.index, depth, c2ws[j], K, intrinsics_width=width)
 
-    if cfg.output.cloud:
-        write_cloud(ply_path, world_pts[cloud_mask], cols[cloud_mask])
-        print(f"  wrote {cloud_mask.sum():,} points -> {ply_path.relative_to(ds.root)}")
-
-    print(f"done: predictions/{cfg.output.method}/ under {ds.root}")
+        if out.spec.cloud:
+            out.write_cloud(world_pts[cloud_mask], cols[cloud_mask])
+            print(f"  wrote {cloud_mask.sum():,} points -> {out.cloud_path.relative_to(out.root)}")
 
 
 if __name__ == "__main__":
-    main()
+    cli_main(VGGT, description=__doc__)

@@ -14,8 +14,7 @@ writes to results_output/ whenever Model.save_depth_conf_result is on -- the def
 own fused point cloud) through baselines.common.runner's shared Baseline/SequenceOutput.
 
 Usage -- inside the container (build_container.sh once, then run_container.sh for a shell):
-    python run_sequence.py --data ../configs/data/old_house.yaml --model ../configs/da3_streaming.yaml
-    python run_sequence.py ../configs/da3_streaming_glass_house.yaml   # both halves in one file
+    python run_sequence.py ../configs/da3_streaming/da3_streaming-example-config.yaml
 
 Paths are the same inside the container as on the host, so absolute config paths work too.
 Do not run this outside the container: it needs the image's torch/depth-anything-3 install.
@@ -184,6 +183,45 @@ def ensure_weights_downloaded(model_config_path: Path) -> None:
             shutil.rmtree(scratch, ignore_errors=True)
 
 
+def avoid_single_chunk_bug(model_config_path: Path, n_frames: int, out_dir: Path) -> Path:
+    """Works around a bug in da3_streaming.py's own save_camera_poses: when the whole sequence
+    fits in a single chunk (n_frames <= Model.chunk_size), its first-chunk loop still trims the
+    last Model.overlap frames off the end, assuming a second chunk will cover them -- but with
+    only one chunk, nothing does, so those frames' poses/intrinsics are left as None and it
+    crashes at `pose.flatten()`. Chunks past the first always cover their own tail correctly
+    (checked: chunk i's trimmed end lines up exactly with chunk i+1's start, since non-final
+    chunks are always exactly Model.chunk_size long), so this only ever bites the single-chunk
+    case -- every stock config (base_config.yaml/kitti.yaml/tum.yaml) uses chunk_size: 120, which
+    is bigger than these baselines' ~99-frame example sequences, so it's easy to hit by accident.
+
+    Returns `model_config_path` unchanged if n_frames > Model.chunk_size (already safe -- this
+    never fires on a real, long sequence, which is what da3_streaming is actually for). Otherwise
+    writes an adjusted copy -- Model.chunk_size lowered just enough to force at least two chunks,
+    Model.overlap capped to stay below it -- to `out_dir` and returns that path instead, printing
+    a warning so this doesn't silently diverge from what the config actually asked for.
+    """
+    cfg = yaml.safe_load(model_config_path.read_text())
+    model_cfg = cfg.get("Model", {})
+    chunk_size, overlap = model_cfg.get("chunk_size"), model_cfg.get("overlap", 0)
+    if not chunk_size or n_frames > chunk_size:
+        return model_config_path
+
+    new_chunk_size = max(1, n_frames - 1)
+    new_overlap = min(overlap, new_chunk_size - 1) if new_chunk_size > 1 else 0
+    print(
+        f"WARNING: {n_frames} frames <= model.config's Model.chunk_size ({chunk_size}) -- "
+        "da3_streaming.py's save_camera_poses crashes in this single-chunk case (see "
+        "avoid_single_chunk_bug's docstring in run_sequence.py), so auto-lowering chunk_size to "
+        f"{new_chunk_size} and overlap to {new_overlap} for this run only. Set a smaller "
+        "Model.chunk_size in your own config if you want control over the exact values used."
+    )
+    model_cfg["chunk_size"], model_cfg["overlap"] = new_chunk_size, new_overlap
+    cfg["Model"] = model_cfg
+    out_path = out_dir / "config.yaml"
+    out_path.write_text(yaml.safe_dump(cfg))
+    return out_path
+
+
 def run_da3_streaming(image_dir: Path, config_path: Path, output_dir: Path) -> None:
     """Runs da3_streaming.py exactly as documented (its own README: `python da3_streaming.py
     --image_dir ... --config ... --output_dir ...`, from inside the submodule) -- its weight
@@ -225,11 +263,13 @@ class DA3Streaming(Baseline):
         output_dir = out.scratch_dir("da3_streaming")
         try:
             with tempfile.TemporaryDirectory(prefix="da3-streaming-") as tmp:
-                staging_dir = Path(tmp) / "frames"
+                tmp_path = Path(tmp)
+                staging_dir = tmp_path / "frames"
                 stage_frames(frames, staging_dir)
+                config_path = avoid_single_chunk_bug(self.model_config_path, len(frames), tmp_path)
 
                 print(f"running {len(frames)} frames (chunked, see {self.model_config_path.name}) ...")
-                run_da3_streaming(staging_dir, self.model_config_path, output_dir)
+                run_da3_streaming(staging_dir, config_path, output_dir)
 
             c2ws = read_camera_poses(output_dir / "camera_poses.txt", len(frames))
             align = _gt_frame0_alignment(c2ws, frames[0].camera().c2w)  # one rigid transform for the run

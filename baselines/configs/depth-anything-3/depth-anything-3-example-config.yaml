@@ -1,11 +1,22 @@
-# Baseline config for Depth Anything 3: its own knobs, nothing about which data to run on.
-# Reusable across assets — pair it with a data config from configs/data/:
+# Example config for baselines/depth_anything_3/run_sequence.py, both halves in one file:
 #
-#   python run_sequence.py --data ../configs/data/old_house.yaml --model ../configs/da3.yaml
+#   python run_sequence.py ../configs/depth-anything-3/depth-anything-3-example-config.yaml
 #
 # Every field has a default in run_sequence.py's dataclasses; only override what you need.
-# A copy of this, plus the data config and the variants that ran, is written to
-# <asset>/predictions/<method>/config.yaml after each run.
+# A copy of this, plus the variants that ran, is written to <asset>/predictions/<method>/config.yaml
+# after each run. To reuse the model:/output: half across assets instead, copy this file, drop its
+# dataset: section, and pair it with a data config from configs/data/ via --model/--data (a file
+# with a dataset: key isn't accepted as --model -- see baselines/common/config.py's own docstring
+# for the two-halves convention).
+
+dataset:
+  root: /home/jgray/eccv_2026_data/old_house/     # asset folder, e.g. path to glass_house
+  trajectory: trendspek             # null picks the only one, if there's just one
+  illumination: sunny
+  soil: verylow                    # or `reflectivity:`, whichever axis this asset varies
+  frame_start: 0
+  frame_end: null                # null = to the end
+  frame_stride: 1
 
 model:
   hf_repo: depth-anything/DA3NESTED-GIANT-LARGE
