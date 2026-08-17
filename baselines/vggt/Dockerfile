@@ -40,7 +40,7 @@ RUN pip install --no-cache-dir -e .
 
 # Install inspection_dataset_tools requirements
 COPY requirements.txt ./requirements_idt.txt
-RUN pip install --no-cache-dir -r ./requirements_idt.txt 
+RUN pip install --no-cache-dir -r /requirements_idt.txt 
 
 # Interactive shells source your host ~/.bashrc (your home is mounted), which may re-order PATH
 # — e.g. a conda/mamba hook — so re-assert the image's venv afterwards: inside the container,

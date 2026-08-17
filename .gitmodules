@@ -13,3 +13,6 @@
 [submodule "Pi3"]
 	path = Pi3
 	url = git@github.com:yyfz/Pi3.git
+[submodule "VGGT-Long"]
+	path = VGGT-Long
+	url = git@github.com:DengKaiCQ/VGGT-Long.git
