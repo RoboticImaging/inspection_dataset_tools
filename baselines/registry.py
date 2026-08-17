@@ -14,6 +14,7 @@ import importlib
 
 BASELINES = {
     "da3": "baselines.depth_anything_3.run_sequence:DepthAnything3",
+    "da3_streaming": "baselines.da3_streaming.run_sequence:DA3Streaming",
 }
 
 
