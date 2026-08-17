@@ -1,0 +1,24 @@
+# Baseline config for VGGT-Long: its own knobs, nothing about which data to run on.
+# Reusable across assets — pair it with a data config from configs/data/:
+#
+#   python run_sequence.py --data ../configs/data/old_house.yaml --model ../configs/vggt-long.yaml
+#
+# Every field has a default in run_sequence.py's dataclasses; only override what you need.
+# A copy of this, plus the data config and the variants that ran, is written to
+# <asset>/predictions/<method>/config.yaml after each run.
+
+model:
+  # Path to a VGGT-Long native config yaml (its own Weights/Model/Loop schema), resolved relative
+  # to the VGGT-Long submodule root if not absolute. Pick which foundation model VGGT-Long chunks
+  # (VGGT/Pi3/Mapanything), chunk_size, overlap, loop closure, etc. there -- see
+  # VGGT-Long/configs/base_config.yaml and its own README for the full set of knobs.
+  config: configs/base_config.yaml
+
+output:
+  # -> predictions/{method}/{illumination}/{depths,cam_params}/soil={soil},traj={traj}/
+  #    predictions/{method}/{illumination}/clouds/soil={soil},traj={traj}.ply
+  # (keyed by the full variant, so runs on different illumination/soil never overwrite each other)
+  method: null                  # null = the baseline's registered name ("vggt-long"); set it to
+                                 # run two configurations of the same baseline side by side
+  overwrite: false              # false = skip sequences that already have predictions
+  cloud: true                    # VGGT-Long's own fused, confidence-filtered cloud (see its config's Model.Pointcloud_Save)

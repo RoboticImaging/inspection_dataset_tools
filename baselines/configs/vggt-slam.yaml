@@ -1,19 +1,16 @@
-# Example config for baselines/VGGT-SLAM/run_sequence.py.
-# Every field has a default in run_sequence.py's Config dataclasses; only override what you need.
+# Baseline config for VGGT-SLAM: its own knobs, nothing about which data to run on.
+# Reusable across assets — pair it with a data config from configs/data/:
+#
+#   python run_sequence.py --data ../configs/data/old_house.yaml --model ../configs/vggt-slam.yaml
+#
+# Every field has a default in run_sequence.py's dataclasses; only override what you need.
+# A copy of this, plus the data config and the variants that ran, is written to
+# <asset>/predictions/<method>/config.yaml after each run.
 #
 # run:/vis: live *under* model: here (not top-level) -- baselines.common.runner's RunConfig only
 # recognizes `model:`/`output:` at the top level of a baseline config; run_sequence.py's own
 # ModelConfig nests RunConfig/VisConfig as `model.run`/`model.vis` to keep them as their own
 # section instead of flattening every field directly under model:.
-
-dataset:
-  root: /home/jgray/eccv_2026_data/old_house/     # asset folder, e.g. path to glass_house
-  trajectory: trendspek             # null picks the only one, if there's just one
-  illumination: sunny
-  soil: verylow                    # or `reflectivity:`, whichever axis this asset varies
-  frame_start: 0
-  frame_end: null              # null = to the end
-  frame_stride: 1
 
 model:
   checkpoint_url: https://huggingface.co/facebook/VGGT-1B/resolve/main/model.pt
@@ -34,11 +31,11 @@ model:
     max_loops: 1
 
 output:
-  # -> predictions/vggt-slam/{illumination}/{depths,cam_params}/soil={soil},traj={traj}/
-  #    predictions/vggt-slam/{illumination}/clouds/soil={soil},traj={traj}.ply
+  # -> predictions/{method}/{illumination}/{depths,cam_params}/soil={soil},traj={traj}/
+  #    predictions/{method}/{illumination}/clouds/soil={soil},traj={traj}.ply
   # (keyed by the full variant, so runs on different illumination/soil never overwrite each other)
   method: null            # null = the baseline's registered name ("vggt-slam"); set it to run
                            # two configurations of the same baseline side by side
-  overwrite: true
+  overwrite: false        # false = skip sequences that already have predictions
   min_confidence: null    # unused here -- point-cloud confidence filtering is model.run.conf_threshold, applied inside the SLAM backend itself
   cloud: true              # fused .ply, unprojected from predicted depth + poses

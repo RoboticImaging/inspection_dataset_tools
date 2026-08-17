@@ -8,7 +8,6 @@ baselines/depth_anything_3/run_sequence.py.
 
 Usage — inside the container (build_container.sh once, then run_container.sh for a shell):
     python run_sequence.py --data ../configs/data/old_house.yaml --model ../configs/vggt.yaml
-    python run_sequence.py ../configs/vggt_glass_house.yaml      # both halves in one file
 
 Paths are the same inside the container as on the host, so absolute config paths work too.
 Do not run this outside the container: it needs the image's torch/vggt install.

@@ -14,7 +14,7 @@ writes to results_output/ whenever Model.save_depth_conf_result is on -- the def
 own fused point cloud) through baselines.common.runner's shared Baseline/SequenceOutput.
 
 Usage -- inside the container (build_container.sh once, then run_container.sh for a shell):
-    python run_sequence.py ../configs/da3_streaming/da3_streaming-example-config.yaml
+    python run_sequence.py --data ../configs/data/old_house.yaml --model ../configs/da3_streaming.yaml
 
 Paths are the same inside the container as on the host, so absolute config paths work too.
 Do not run this outside the container: it needs the image's torch/depth-anything-3 install.

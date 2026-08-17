@@ -9,7 +9,6 @@ which instead calls into the model's own glb exporter).
 
 Usage -- inside the container (build_container.sh once, then run_container.sh for a shell):
     python run_sequence.py --data ../configs/data/old_house.yaml --model ../configs/pi3.yaml
-    python run_sequence.py ../configs/pi3/pi3-example-config.yaml    # both halves in one file
 
 Paths are the same inside the container as on the host, so absolute config paths work too.
 Do not run this outside the container: it needs the image's torch/pi3 install.
