@@ -1,3 +1,21 @@
 [submodule "depth-anything-3"]
 	path = depth-anything-3
 	url = https://github.com/bytedance-seed/depth-anything-3
+[submodule "VGGT-SLAM"]
+	path = VGGT-SLAM
+	url = git@github.com:MIT-SPARK/VGGT-SLAM.git
+[submodule "vidmap"]
+	path = vidmap
+	url = git@github.com:cvg/vidmap.git
+[submodule "vggt"]
+	path = vggt
+	url = org-16943930@github.com:facebookresearch/vggt.git
+[submodule "Pi3"]
+	path = Pi3
+	url = git@github.com:yyfz/Pi3.git
+[submodule "VGGT-Long"]
+	path = VGGT-Long
+	url = git@github.com:DengKaiCQ/VGGT-Long.git
+[submodule "Pi-Long"]
+	path = Pi-Long
+	url = git@github.com:DengKaiCQ/Pi-Long.git
