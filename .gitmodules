@@ -16,3 +16,6 @@
 [submodule "VGGT-Long"]
 	path = VGGT-Long
 	url = git@github.com:DengKaiCQ/VGGT-Long.git
+[submodule "Pi-Long"]
+	path = Pi-Long
+	url = git@github.com:DengKaiCQ/Pi-Long.git
