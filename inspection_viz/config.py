@@ -38,6 +38,15 @@ class Layout:
     # The config a baseline ran with, written once per method (see baselines/common/runner.py).
     # Not a variant template: it records the whole run, every variant of it included.
     pred_config_file: str = "predictions/{method}/config.yaml"
+    # A colmap run's folder for one variant, one {mode} (e.g. "no_gt") at a time -- same
+    # illumination/soil/reflectivity axes as pred_depth_dir and for the same reason: colmap runs
+    # SfM from rgb, so a different illumination or soil level is a genuinely different
+    # reconstruction. Poses, depth and the fused cloud all come from *inside* this one folder
+    # (see inspection_viz.colmap), unlike a regular method's separate depth/cam/cloud templates.
+    colmap_dir: tuple = (
+        "colmap/{mode}/{illumination}/soil={soil},traj={traj}",
+        "colmap/{mode}/{illumination}/ref={reflectivity},traj={traj}",
+    )
     mesh_file: str = "{name}_{kind}.glb"  # gt meshes at the asset root, keyed by {kind}
     rgb_exts: tuple = (".jpg", ".jpeg", ".png")
     depth_exts: tuple = (".exr",)

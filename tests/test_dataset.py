@@ -5,7 +5,14 @@ import numpy as np
 import pytest
 
 from inspection_viz import AssetDataset, Layout, Variant
-from tests.conftest import make_asset, make_predictions
+from tests.conftest import make_asset, make_colmap, make_predictions
+
+try:
+    import pycolmap  # noqa: F401  (only used to decide whether to skip the colmap tests below)
+    HAS_PYCOLMAP = True
+except ImportError:
+    HAS_PYCOLMAP = False
+needs_pycolmap = pytest.mark.skipif(not HAS_PYCOLMAP, reason="pycolmap not installed")
 
 GLASS_HOUSE = Path("/home/ngoncharov/repos/inspection_datset_visualizer/glass_house")
 V = Variant("trajA", "sunny", "low")
@@ -175,6 +182,74 @@ def test_predictions_discovered_and_selectable(tmp_path):
     # ...as does an unknown method name
     with pytest.raises(KeyError):
         ds.sequence(V, source="nope")
+
+
+@needs_pycolmap
+def test_colmap_run_discovered_and_selectable(tmp_path):
+    layout = Layout()
+    root = make_asset(tmp_path / "a", layout=layout)
+    make_colmap(root, layout, "no_gt", V.as_dict(), cloud=True)
+    ds = AssetDataset(root, layout=layout)
+    assert ds.methods == ["colmap/no_gt"]
+    assert ds.prediction_variants("colmap/no_gt") == [V]
+
+    seq = ds.sequence(V, source="colmap/no_gt")
+    assert len(seq) == 3
+    for f in seq:
+        assert f.rgb().shape == (6, 8, 3)  # rgb still comes from gt
+        assert f.depth().shape == (6, 8)
+        assert f.camera() is not None
+    assert ds.cloud_path(V, "colmap/no_gt") == \
+        root / "colmap/no_gt/sunny/soil=low,traj=trajA/dense/fused.ply"
+
+
+@needs_pycolmap
+def test_colmap_camera_matches_the_written_pose(tmp_path):
+    layout = Layout()
+    root = make_asset(tmp_path / "a", layout=layout)
+    make_colmap(root, layout, "no_gt", V.as_dict(), depth_value=2.0)
+    ds = AssetDataset(root, layout=layout)
+
+    frame = ds.sequence(V, source="colmap/no_gt")[0]
+    cam = frame.camera()
+    assert np.allclose(cam.position, [0.0, 0.0, -5.0], atol=1e-5)  # inverse of the w2c fixture wrote
+    assert (cam.width, cam.height) == (8, 6)
+    assert np.allclose(frame.depth(), 2.0)
+
+
+@needs_pycolmap
+def test_colmap_drops_an_unregistered_frame_like_a_missing_prediction(tmp_path):
+    layout = Layout()
+    root = make_asset(tmp_path / "a", layout=layout, n_frames=4)
+    make_colmap(root, layout, "no_gt", V.as_dict(), n_frames=4, unregistered=(2,))
+    ds = AssetDataset(root, layout=layout)
+
+    seq = ds.sequence(V, source="colmap/no_gt")
+    assert len(seq) == 4  # rgb still has every frame
+    assert seq[2].camera() is None and seq[2].depth() is None
+    assert seq[0].camera() is not None and seq[0].depth() is not None
+
+
+@needs_pycolmap
+def test_colmap_variants_are_keyed_by_the_full_variant_like_predictions(tmp_path):
+    layout = Layout()
+    root = make_asset(tmp_path / "a", layout=layout)
+    make_colmap(root, layout, "no_gt", V.as_dict())
+    ds = AssetDataset(root, layout=layout)
+
+    with pytest.raises(KeyError):
+        ds.sequence(Variant("trajA", "night", "low"), source="colmap/no_gt")
+    assert ds.cloud_path(Variant("trajA", "night", "low"), "colmap/no_gt") is None
+
+
+@needs_pycolmap
+def test_colmap_and_predictions_coexist(tmp_path):
+    layout = Layout()
+    root = make_asset(tmp_path / "a", layout=layout)
+    make_predictions(root, layout, "da3", V.as_dict())
+    make_colmap(root, layout, "no_gt", V.as_dict())
+    ds = AssetDataset(root, layout=layout)
+    assert ds.methods == ["colmap/no_gt", "da3"]
 
 
 def test_predictions_dont_leak_into_gt(tmp_path):

@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 import trimesh
 
-from conftest import WH, make_asset, make_predictions, write_cam, write_depth_exr
+from conftest import WH, make_asset, make_colmap, make_predictions, write_cam, write_depth_exr
 from inspection_eval import (Sim3, evaluate, frame_gaps, target_from_path, targets_from_paths,
                              umeyama)
 from inspection_eval.case import EvalCase, match_size
@@ -21,6 +21,13 @@ from inspection_eval.report import Table
 from inspection_viz import Layout
 from inspection_viz.config import fill_template
 from inspection_viz.dataset import AssetDataset, Variant
+
+try:
+    import pycolmap  # noqa: F401  (only used to decide whether to skip the colmap tests below)
+    HAS_PYCOLMAP = True
+except ImportError:
+    HAS_PYCOLMAP = False
+needs_pycolmap = pytest.mark.skipif(not HAS_PYCOLMAP, reason="pycolmap not installed")
 
 BINDS = {"traj": "trajA", "illumination": "sunny", "soil": "low"}
 VARIANT = Variant("trajA", "sunny", "low")
@@ -265,6 +272,48 @@ def test_asset_or_predictions_dir_stands_for_every_method(tmp_path):
         assert [t.method for t in targets_from_paths([path])] == ["da3", "vggt"]
     # a duplicate (the asset and one of its methods) is only evaluated once
     assert len(targets_from_paths([root, root / "predictions" / "da3"])) == 2
+
+
+def test_target_from_path_recognizes_a_colmap_mode_folder(tmp_path):
+    (tmp_path / "asset" / "colmap" / "no_gt").mkdir(parents=True)
+    target = target_from_path(tmp_path / "asset" / "colmap" / "no_gt")
+    assert target.method == "colmap/no_gt"
+    assert target.dataset.root == tmp_path / "asset"
+
+
+def test_asset_or_colmap_dir_stands_for_every_mode(tmp_path):
+    for mode in ("gt_cams", "no_gt"):
+        (tmp_path / "asset" / "colmap" / mode).mkdir(parents=True)
+    for path in (tmp_path / "asset", tmp_path / "asset" / "colmap"):
+        methods = sorted(t.method for t in targets_from_paths([path]))
+        assert methods == ["colmap/gt_cams", "colmap/no_gt"]
+
+
+def test_asset_root_expands_predictions_and_colmap_together(tmp_path):
+    layout = Layout()
+    root = make_asset(tmp_path / "asset")
+    make_predictions(root, layout, "da3", BINDS)
+    (root / "colmap" / "no_gt").mkdir(parents=True)
+    assert sorted(t.method for t in targets_from_paths([root])) == ["colmap/no_gt", "da3"]
+
+
+@needs_pycolmap
+def test_colmap_case_scores_depth_and_cloud(tmp_path):
+    layout = Layout()
+    root = make_asset(tmp_path / "asset", trajs=("trajA",), illums=("sunny",), soils=("low",),
+                      n_frames=3)  # gt depth is 5.0, written by make_asset
+    make_colmap(root, layout, "no_gt", BINDS, n_frames=3, depth_value=3.0)
+    ds = AssetDataset(root, layout)
+
+    case = EvalCase(ds, "colmap/no_gt", VARIANT, align_mode="none")
+    assert "depth" in case.capabilities
+    assert case.fused_cloud_path is not None  # the fixture's fused.ply, discovered like any cloud
+    row = get("depth").fn(case, DepthOptions(scale="none"))
+    assert row["MAE (m)"] == pytest.approx(2.0, rel=1e-3)  # |5.0 gt - 3.0 pred|
+
+    results = evaluate(targets_from_paths([root / "colmap" / "no_gt"]), ["depth"])
+    assert len(results.tables["depth"]) == 1
+    assert results.tables["depth"].rows[0]["Method"] == "colmap/no_gt"
 
 
 def test_runner_scores_every_variant_of_a_method(tmp_path):
@@ -798,6 +847,15 @@ def test_eval_cli_keeps_results_when_asked_nothing(tmp_path, capsys):
 
 
 # --- eval.py's output folder naming ---------------------------------------------------------
+
+
+def test_run_label_flattens_a_colmap_methods_slash(tmp_path):
+    import eval as eval_cli
+
+    ds = case_asset(tmp_path, n_frames=2)  # any dataset root; run_label never reads its contents
+    (ds.root / "colmap" / "no_gt").mkdir(parents=True)
+    targets = targets_from_paths([ds.root / "colmap" / "no_gt"])
+    assert eval_cli.run_label(targets) == "asset-colmap-no_gt"  # not nested folders on disk
 
 
 def test_run_label_names_a_single_asset_and_method(tmp_path):
