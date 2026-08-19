@@ -14,7 +14,7 @@
 
 model:
   device: cuda
-  # checkpoint: /path/to/vggt_omega_1b_512.pt   # local checkpoint; unset = download hf_repo/hf_filename (gated, see above)
+  checkpoint: /home/jgray/vggt-omega/vggt_omega_1b_512.pt   # local checkpoint; unset = download hf_repo/hf_filename (gated, see above)
   hf_repo: facebook/VGGT-Omega
   hf_filename: vggt_omega_1b_512.pt
   enable_alignment: false       # must match the checkpoint -- the "-Text-Alignment" one needs this true (+ image_resolution: 256)
@@ -29,5 +29,7 @@ output:
   method: null                  # null = the baseline's registered name ("vggt-omega"); set it to
                                 # run two configurations of the same baseline side by side
   overwrite: false              # false = skip sequences that already have predictions
-  min_confidence: 50.0          # percentile (0-100) of lowest-confidence points dropped from the cloud; null = keep everything
+  min_confidence: null           # per-frame depth masking isn't wired up in this baseline's run_sequence.py yet
+                                # (write_frame requires a conf array whenever this is set; only the
+                                # point cloud is confidence-filtered here) -- keep null until that's added
   cloud: true                    # fused .ply, unprojected from predicted depth + poses
