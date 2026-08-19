@@ -18,7 +18,7 @@ from inspection_viz.camera import Camera
 from inspection_viz.dataset import AssetDataset, Frame, Variant
 
 from . import geometry
-from .align import Sim3, umeyama
+from .align import Sim3, fit_cameras
 
 ALIGN_MODES = ("sim3", "se3", "none")
 
@@ -92,11 +92,9 @@ class EvalCase:
     @cached_property
     def transform(self) -> Sim3:
         """Gauge transform prediction -> gt, fitted to the shared camera centers."""
-        if self.align_mode == "none" or len(self.cam_frames) < 3:
+        if self.align_mode == "none":
             return Sim3()
-        src = np.array([self.raw_pred_cams[i].position for i in self.cam_frames])
-        dst = np.array([self.gt_cams[i].position for i in self.cam_frames])
-        return umeyama(src, dst, with_scale=self.align_mode == "sim3")
+        return fit_cameras(self.raw_pred_cams, self.gt_cams, with_scale=self.align_mode == "sim3")
 
     @cached_property
     def pred_cams(self) -> dict[int, Camera]:

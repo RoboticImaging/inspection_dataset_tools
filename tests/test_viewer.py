@@ -1,11 +1,13 @@
 import socket
 import time
 
+import numpy as np
 import pytest
 import trimesh
 
 from inspection_viz import Layout, Viewer
-from tests.conftest import make_asset, make_predictions
+from inspection_viz.config import fill_template
+from tests.conftest import make_asset, make_predictions, write_cam
 
 
 def free_port() -> int:
@@ -112,6 +114,63 @@ def test_prediction_without_cloud_falls_back_to_depth(tmp_path, viewer):
     viewer._source.value = "da3"
     assert viewer._fused is None and viewer._cloud_file is None
     assert viewer._clouds and all(h is not None for h in viewer._clouds.values())
+
+
+def _asset_with_a_rescaled_prediction(root):
+    """gt steps along +x at unit spacing; da3's own poses are the same trajectory at 1/3 scale,
+    shifted -- so a correct fit recovers scale=3 and lines every frame back up with gt."""
+    layout = Layout()
+    binds = {"traj": "trajA", "illumination": "sunny", "soil": "low"}
+    a = make_asset(root, trajs=("trajA",), illums=("sunny",), soils=("low",), n_frames=4)
+    cam_dir = a / layout.cam_dir.format(**binds)
+    for i in range(4):
+        write_cam(cam_dir / f"{i:08d}.json", loc=(float(i), 0.0, 5.0))
+    make_predictions(a, layout, "da3", binds, n_frames=4)
+    pred_cam_dir = a / fill_template(layout.pred_cam_dir, method="da3", **binds)
+    for i in range(4):
+        write_cam(pred_cam_dir / f"{i:08d}.json", loc=(i / 3.0 + 10.0, 0.0, 5.0))
+    return a
+
+
+def test_align_to_gt_fits_a_prediction_into_the_gt_gauge(tmp_path, viewer):
+    viewer.load_asset(_asset_with_a_rescaled_prediction(tmp_path / "a"))
+    viewer._source.value = "da3"
+
+    assert viewer._aligned
+    assert viewer._transform.scale == pytest.approx(3.0, rel=1e-3)
+    assert "aligned to gt" in viewer._status.content
+
+    gt0 = viewer.ds.sequence(viewer._variant(), "gt")[0].camera().position
+    aligned0 = viewer._transform.c2w(viewer.seq[0].camera().c2w)[:3, 3]
+    assert np.allclose(aligned0, gt0, atol=1e-4)
+    # the frustum on screen is built from the aligned pose, not the raw predicted one
+    assert np.allclose(viewer._frustums[viewer._frame.value].position, aligned0, atol=1e-4)
+
+
+def test_align_toggle_moves_geometry_without_reloading_the_sequence(tmp_path, viewer):
+    viewer.load_asset(_asset_with_a_rescaled_prediction(tmp_path / "a"))
+    viewer._source.value = "da3"
+    seq_before = viewer.seq
+    aligned_pos = viewer._frustums[viewer._frame.value].position.copy()
+
+    viewer._align.value = False
+    assert not viewer._aligned and "aligned to gt" not in viewer._status.content
+    assert viewer.seq is seq_before  # no reload -- same frames, just re-placed
+    raw_pos = viewer._frustums[viewer._frame.value].position.copy()
+    assert not np.allclose(raw_pos, aligned_pos)
+    assert np.allclose(raw_pos, viewer.seq[viewer._frame.value].camera().position)
+
+    viewer._align.value = True
+    assert viewer.seq is seq_before
+    assert np.allclose(viewer._frustums[viewer._frame.value].position, aligned_pos, atol=1e-4)
+
+
+def test_align_off_shows_gt_unmoved(tmp_path, viewer):
+    viewer.load_asset(_asset_with_a_rescaled_prediction(tmp_path / "a"))
+    assert viewer._source.value == "gt"
+    assert not viewer._aligned  # nothing to align gt to
+    assert "aligned to gt" not in viewer._status.content
+    assert viewer._transform.scale == 1.0
 
 
 def test_stale_mesh_bake_is_dropped(tmp_path, viewer):
