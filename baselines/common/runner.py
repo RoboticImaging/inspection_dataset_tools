@@ -22,7 +22,7 @@ from inspection_viz.config import Layout, fill_template
 from inspection_viz.dataset import AssetDataset, Frame, Variant
 
 from .config import OutputSpec, RunConfig, add_config_args, config_from_args
-from .writer import cloud_path, frame_stem, output_dirs, write_cam, write_cloud, write_depth
+from .writer import cloud_path, ensure_dir, frame_stem, output_dirs, write_cam, write_cloud, write_depth
 
 
 def variant_label(variant: Variant) -> str:
@@ -183,7 +183,7 @@ def write_run_config(root: Path, layout: Layout, method: str, baseline: Baseline
     if kept:
         payload["variants_kept"] = [v.as_dict() for v in kept]  # left as an earlier run wrote them
     path = root / fill_template(layout.pred_config_file, method=method)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_dir(path.parent)
     path.write_text(yaml.safe_dump(payload, sort_keys=False))
     return path
 
