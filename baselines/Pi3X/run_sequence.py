@@ -59,8 +59,8 @@ class ModelConfig:
     chunk_size: int = 16
     overlap: int = 6
     # Confidence floor Pi3XVO uses internally to decide which points are trustworthy enough to
-    # align consecutive chunks against -- separate from output.min_confidence below, which is our
-    # own point-cloud export filter applied after the fact.
+    # align consecutive chunks against -- separate from output.cloud_confidence_percentile, which
+    # is our own point-cloud export filter applied after the fact.
     conf_thre: float = 0.05
 
 
@@ -210,15 +210,15 @@ class Pi3X(Baseline):
             cols = predictions["images"].transpose(0, 2, 3, 1).reshape(-1, 3)  # (S,3,h,w) -> (S*h*w,3), [0,1]
             cols = (cols * 255).clip(0, 255).astype(np.uint8)
             cloud_mask = np.isfinite(world_pts).all(axis=1)
-            if out.spec.min_confidence is not None:
+            if out.spec.cloud_confidence_percentile is not None:
                 # A percentile (0-100) of lowest-confidence points to drop, not an absolute cutoff
                 # -- matches baselines/vggt/run_sequence.py's own point-cloud confidence filter
                 # (percentile relative to this run's own conf distribution, since raw confidence
                 # isn't comparable across runs/models the way an absolute probability is). Only
                 # ever filters the cloud, not per-pixel depth (unlike SequenceOutput.write_frame's
-                # own min_confidence, which is an absolute cutoff -- not used here).
+                # own min_confidence, an absolute cutoff -- deliberately never set here).
                 confs = conf.reshape(-1)
-                conf_thresh_absolute = np.percentile(confs, out.spec.min_confidence)
+                conf_thresh_absolute = np.percentile(confs, out.spec.cloud_confidence_percentile)
                 cloud_mask &= (confs >= conf_thresh_absolute) & (confs >= 1e-5)
 
         for j, f in enumerate(frames):

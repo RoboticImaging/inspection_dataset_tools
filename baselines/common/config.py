@@ -132,6 +132,15 @@ class OutputSpec:
     method: str | None = None
     overwrite: bool = False
     min_confidence: float | None = None  # pixels below this get depth=nan; None = keep everything
+    # A percentile (0-100) of a baseline's own lowest-confidence *cloud* points to drop before
+    # fusing -- unrelated to min_confidence above (an absolute per-pixel depth cutoff): this only
+    # ever thins the point cloud a baseline's run_sequence.py builds itself, never touches depth,
+    # and isn't consumed by write_frame at all. None = keep every point. Split into its own field
+    # (rather than overloading min_confidence for both meanings) because the two aren't
+    # interchangeable -- a percentile isn't a depth threshold, and mixing them previously meant
+    # any baseline using this percentile convention without also constructing a per-pixel conf
+    # array crashed on its very first write_frame call (min_confidence set, conf=None).
+    cloud_confidence_percentile: float | None = None
     # One fused .ply per variant, unprojected from the predicted depth + poses. Confidence
     # filtering and the point cap are left to whatever post-processing defaults the model's own
     # exporter uses, so the cloud matches what that model ships as its reference output.

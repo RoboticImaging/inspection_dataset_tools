@@ -20,5 +20,6 @@ output:
   method: null                  # null = the baseline's registered name ("pi3"); set it to run
                                 # two configurations of the same baseline side by side
   overwrite: false              # false = skip sequences that already have predictions
-  min_confidence: 50.0          # percentile (0-100) of lowest-confidence points dropped from the cloud; null = keep everything
+  min_confidence: null          # absolute per-pixel depth cutoff -- Pi3 doesn't use this, see below
+  cloud_confidence_percentile: 50.0  # percentile (0-100) of lowest-confidence points dropped from the cloud; null = keep everything
   cloud: true                    # fused .ply, unprojected from predicted depth + poses
