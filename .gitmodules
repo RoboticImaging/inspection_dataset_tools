@@ -19,3 +19,6 @@
 [submodule "Pi-Long"]
 	path = Pi-Long
 	url = git@github.com:DengKaiCQ/Pi-Long.git
+[submodule "vggt-omega"]
+	path = vggt-omega
+	url = https://github.com/facebookresearch/vggt-omega.git
