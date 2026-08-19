@@ -1,0 +1,33 @@
+# Baseline config for VGGT-Omega: its own knobs, nothing about which data to run on.
+# Reusable across assets — pair it with a data config from configs/data/:
+#
+#   python run_sequence.py --data ../configs/data/old_house.yaml --model ../configs/vggt-omega.yaml
+#
+# Every field has a default in run_sequence.py's dataclasses; only override what you need.
+# A copy of this, plus the data config and the variants that ran, is written to
+# <asset>/predictions/<method>/config.yaml after each run.
+#
+# NOTE: unlike every other baseline here, VGGT-Omega's checkpoints are a *gated* HuggingFace repo
+# (facebook/VGGT-Omega) -- request access there first, then either run `hf auth login` or
+# set $HF_TOKEN before run_container.sh, or download a checkpoint yourself and point `checkpoint`
+# at it below.
+
+model:
+  device: cuda
+  # checkpoint: /path/to/vggt_omega_1b_512.pt   # local checkpoint; unset = download hf_repo/hf_filename (gated, see above)
+  hf_repo: facebook/VGGT-Omega
+  hf_filename: vggt_omega_1b_512.pt
+  enable_alignment: false       # must match the checkpoint -- the "-Text-Alignment" one needs this true (+ image_resolution: 256)
+  image_resolution: 512
+  mode: balanced                 # 'balanced' or 'max_size', see vggt_omega.utils.load_fn.load_and_preprocess_images
+  patch_size: 16
+
+output:
+  # -> predictions/{method}/{illumination}/{depths,cam_params}/soil={soil},traj={traj}/
+  #    predictions/{method}/{illumination}/clouds/soil={soil},traj={traj}.ply
+  # (keyed by the full variant, so runs on different illumination/soil never overwrite each other)
+  method: null                  # null = the baseline's registered name ("vggt-omega"); set it to
+                                # run two configurations of the same baseline side by side
+  overwrite: false              # false = skip sequences that already have predictions
+  min_confidence: 50.0          # percentile (0-100) of lowest-confidence points dropped from the cloud; null = keep everything
+  cloud: true                    # fused .ply, unprojected from predicted depth + poses
