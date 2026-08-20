@@ -22,7 +22,8 @@ from inspection_viz.config import Layout, fill_template
 from inspection_viz.dataset import AssetDataset, Frame, Variant
 
 from .config import OutputSpec, RunConfig, add_config_args, config_from_args
-from .writer import cloud_path, ensure_dir, frame_stem, output_dirs, write_cam, write_cloud, write_depth
+from .writer import (clear_oom, cloud_path, ensure_dir, frame_stem, oom_path, output_dirs,
+                     write_cam, write_cloud, write_depth, write_oom)
 
 
 def variant_label(variant: Variant) -> str:
@@ -49,6 +50,7 @@ class SequenceOutput:
         binds = self.variant.as_dict()
         self.depth_dir, self.cam_dir = output_dirs(self.root, self.layout, self.method, binds)
         self.cloud_path = cloud_path(self.root, self.layout, self.method, binds)
+        self.oom_path = oom_path(self.root, self.layout, self.method, binds)
 
     @property
     def label(self) -> str:
@@ -86,6 +88,15 @@ class SequenceOutput:
         """The one fused world-space cloud for this sequence."""
         write_cloud(self.cloud_path, points, colors)
 
+    def mark_oom(self, message: str) -> None:
+        """Leave a marker recording that this sequence hit a GPU OOM, so a later scan can tell
+        "never run" apart from "ran and ran out of memory" without re-running anything."""
+        write_oom(self.oom_path, message)
+
+    def clear_oom(self) -> None:
+        """Remove a stale OOM marker, e.g. after this sequence is successfully re-run."""
+        clear_oom(self.oom_path)
+
 
 class Baseline:
     """One baseline: a model plus the glue that turns a sequence of frames into predictions.
@@ -115,7 +126,10 @@ def run_baseline(baseline: Baseline, cfg: RunConfig, layout: Layout = Layout(),
     """Run `baseline` over every sequence `cfg.data` selects. Returns the variants it wrote.
 
     Sequences that already have output are skipped unless `output.overwrite` is set, so a run
-    interrupted halfway (or extended to more variants later) can simply be started again.
+    interrupted halfway (or extended to more variants later) can simply be started again. A
+    sequence that hits a GPU OOM is marked (see `SequenceOutput.mark_oom`, `AssetDataset.oom_path`)
+    and the run then stops -- whatever was already done stays, and a re-run picks up where this
+    one left off, skipping the sequences that already have output.
     """
     ds = AssetDataset(cfg.data.asset, layout)
     method = cfg.output.method or baseline.name
@@ -140,7 +154,7 @@ def run_baseline(baseline: Baseline, cfg: RunConfig, layout: Layout = Layout(),
     say(f"{len(todo)} sequence(s) to run for method {method!r} in {ds.root}")
     baseline.setup()
 
-    done = []
+    done, oom_hit = [], None
     for i, out in enumerate(todo, start=1):
         frames = cfg.data.select(ds.sequence(out.variant))
         if not frames:
@@ -148,7 +162,21 @@ def run_baseline(baseline: Baseline, cfg: RunConfig, layout: Layout = Layout(),
                 "skipping")
             continue
         say(f"[{i}/{len(todo)}] {out.label}: {len(frames)} frames")
-        baseline.run(frames, out)
+        try:
+            baseline.run(frames, out)
+        except RuntimeError as exc:
+            if "out of memory" not in str(exc).lower():
+                raise
+            try:
+                import torch
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+            out.mark_oom(str(exc))
+            oom_hit = out.variant
+            say(f"  GPU OOM, marked: {exc}")
+            break
+        out.clear_oom()
         done.append(out.variant)
         say(f"  wrote frames {frames[0].index}..{frames[-1].index}")
 
@@ -157,6 +185,9 @@ def run_baseline(baseline: Baseline, cfg: RunConfig, layout: Layout = Layout(),
                                 kept=[o.variant for o in skipped])
         say(f"done: {len(done)} sequence(s) -> predictions/{method}/ under {ds.root}")
         say(f"  run config: {path.relative_to(ds.root)}")
+    if oom_hit is not None:
+        raise SystemExit(f"GPU OOM on {variant_label(oom_hit)}; marked predictions/{method}/... "
+                         "and stopped (re-run to continue with the remaining sequences)")
     return done
 
 

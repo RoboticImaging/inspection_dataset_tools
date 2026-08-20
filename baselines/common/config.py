@@ -121,6 +121,28 @@ class DataConfig:
 
 DatasetSelection = DataConfig  # the pre-split name; `root` and `variant()` still work on it
 
+EXAMPLE_CONFIGS_DIR = Path(__file__).resolve().parent.parent / "configs" / "data_example"
+
+
+def example_filters(configs_dir: Path = EXAMPLE_CONFIGS_DIR) -> dict:
+    """The traj/illumination/soil/reflectivity filter every baselines/configs/data_example/*.yaml
+    agrees on -- the one sequence those configs pin per asset, for tools that want to run or check
+    just that quick case instead of a full variant sweep. Raises if the configs don't actually
+    agree, since a single filter dict can't express per-asset values."""
+    paths = sorted(configs_dir.glob("*.yaml"))
+    if not paths:
+        raise SystemExit(f"no example configs found under {configs_dir}")
+    configs = [load_config(p, DataConfig) for p in paths]
+    filters = {vfield: getattr(configs[0], cfield) for cfield, vfield in AXES.items()}
+    for path, cfg in zip(paths[1:], configs[1:]):
+        for cfield, vfield in AXES.items():
+            if getattr(cfg, cfield) != filters[vfield]:
+                raise SystemExit(
+                    f"{path.name} sets {cfield}: {getattr(cfg, cfield)!r}, but {paths[0].name} "
+                    f"sets it to {filters[vfield]!r}; --example needs every example config to "
+                    "agree on one filter")
+    return filters
+
 
 @dataclasses.dataclass
 class OutputSpec:

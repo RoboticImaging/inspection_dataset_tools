@@ -4,6 +4,11 @@ The unit of work is one (asset, method, variant): a prediction folder holds ever
 combination a method was run on, and each is scored separately, one row per variant per metric.
 A metric that cannot run on a case (no fused cloud, no gt depth, ...) is skipped for that case
 alone and reported at the end, so a partially-populated prediction folder still yields a table.
+
+The exception is a GPU OOM (see `baselines.common.runner`): once any variant of an (asset, method)
+has hit one, every variant of that pair is reported as a flat "OOM" row instead of being scored,
+on the view that a run known to have failed partway through an asset shouldn't have the variants
+it did finish read as the whole picture. See `oom_variants`.
 """
 
 from dataclasses import dataclass
@@ -47,6 +52,17 @@ class FrameGap:
     variant: Variant
     field: str  # "depth" or "cam"
     indices: list  # list[int], the rgb frames missing that field
+
+
+@dataclass
+class OomVariant:
+    """A variant of `method` that hit a GPU OOM while being predicted (see
+    `baselines.common.runner`) and so has no output to score -- unlike a variant that was simply
+    never run, there's a marker saying why."""
+
+    dataset: AssetDataset
+    method: str
+    variant: Variant
 
 
 @dataclass
@@ -143,6 +159,26 @@ def frame_gaps(targets, filters: dict = None) -> list[FrameGap]:
     return out
 
 
+def _matches(variant: Variant, filters: dict) -> bool:
+    """Does `variant` satisfy every field `filters` sets? (`None` = no constraint on that field.)"""
+    return not any(wanted is not None and getattr(variant, field) != wanted
+                  for field, wanted in (filters or {}).items())
+
+
+def oom_variants(targets, filters: dict = None) -> list[OomVariant]:
+    """Variants of `targets` that hit a GPU OOM during prediction and so have no output to score,
+    among the ones `filters` would otherwise select (same `{field: wanted}` shape as `variants`)."""
+    out = []
+    for target in targets:
+        predicted = set(target.dataset.prediction_variants(target.method))
+        for variant in target.dataset.variants:
+            if variant in predicted or not _matches(variant, filters):
+                continue
+            if target.dataset.oom_path(variant, target.method) is not None:
+                out.append(OomVariant(target.dataset, target.method, variant))
+    return out
+
+
 LABEL_COLUMNS = ("Asset", "Method", "Traj", "Illumination", "Soil", "Reflectivity")
 
 
@@ -167,6 +203,11 @@ def evaluate(targets, metric_names=None, align_mode: str = "sim3", overrides: di
     carried into this run's tables and the cases they cover are not scored again. Rows are only
     written once a case has been through every metric, so a case present in any table is one that
     finished — which makes "everything up to the last completed case" exactly what is skipped.
+
+    A (asset, method) that hit a GPU OOM on any variant is not scored at all: every variant it
+    would otherwise cover is written as a single "OOM" row instead (in every metric's table alike),
+    since a baseline that OOM'd partway through an asset shouldn't be read as if the variants it
+    did finish are the whole picture.
     """
     names = list(metric_names or metrics_pkg.REGISTRY)
     chosen = [metrics_pkg.get(n) for n in names]
@@ -179,7 +220,16 @@ def evaluate(targets, metric_names=None, align_mode: str = "sim3", overrides: di
     results = Results(tables, skips)
     say = on_event or (lambda kind, message, **info: None)
 
-    plan = [(t, v) for t in targets for v in variants(t, **(filters or {}))]
+    oom_targets = {(o.dataset.root, o.method) for o in oom_variants(targets, filters)}
+    plan = []
+    for t in targets:
+        if (t.dataset.root, t.method) in oom_targets:
+            # the whole asset/method is reported as OOM, so every one of its variants belongs in
+            # the plan -- not just the ones that happened to get real output before the OOM hit.
+            vs = [v for v in t.dataset.variants if _matches(v, filters)]
+        else:
+            vs = variants(t, **(filters or {}))
+        plan.extend((t, v) for v in vs)
     total = len(plan)
     say("plan", f"{total} case(s) x {len(chosen)} metric(s)"
                 + (f", {len(done)} already scored" if done else ""),
@@ -187,25 +237,31 @@ def evaluate(targets, metric_names=None, align_mode: str = "sim3", overrides: di
 
     for index, (target, variant) in enumerate(plan, 1):
         case = EvalCase(target.dataset, target.method, variant, align_mode)
-        say("case", f"{target.dataset.root.name} / {target.method} / {variant}",
-            index=index, total=total)
+        is_oom = (target.dataset.root, target.method) in oom_targets
+        say("case", f"{target.dataset.root.name} / {target.method} / {variant}"
+                    + (" [OOM]" if is_oom else ""), index=index, total=total)
         if case_key(case.label) in done:
             say("resumed", "  already scored, kept from the previous run")
             continue
-        for metric in chosen:
-            missing = case.missing(metric.needs)
-            if missing:
-                skips.append(Skip(case, metric.name, f"no {', '.join(missing)}"))
-                say("skip", f"  {metric.name}: skipped (no {', '.join(missing)})")
-                continue
-            try:
-                row = metric.fn(case, options[metric.name])
-            except Exception as exc:  # one bad variant must not sink the whole run
-                skips.append(Skip(case, metric.name, f"{type(exc).__name__}: {exc}"))
-                say("error", f"  {metric.name}: failed ({type(exc).__name__}: {exc})")
-                continue
-            tables[metric.name].add({**case.label, **row})
-            say("metric", f"  {metric.name}: ok")
+        if is_oom:
+            for metric in chosen:
+                tables[metric.name].add({**case.label, "OOM": "OOM"})
+            say("oom", "  OOM: this method hit a GPU OOM on this asset, nothing was scored")
+        else:
+            for metric in chosen:
+                missing = case.missing(metric.needs)
+                if missing:
+                    skips.append(Skip(case, metric.name, f"no {', '.join(missing)}"))
+                    say("skip", f"  {metric.name}: skipped (no {', '.join(missing)})")
+                    continue
+                try:
+                    row = metric.fn(case, options[metric.name])
+                except Exception as exc:  # one bad variant must not sink the whole run
+                    skips.append(Skip(case, metric.name, f"{type(exc).__name__}: {exc}"))
+                    say("error", f"  {metric.name}: failed ({type(exc).__name__}: {exc})")
+                    continue
+                tables[metric.name].add({**case.label, **row})
+                say("metric", f"  {metric.name}: ok")
         if after_case:
             after_case(results)
     say("done", f"{total} case(s) scored", index=total, total=total)

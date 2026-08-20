@@ -68,6 +68,11 @@ def cloud_path(root: Path, layout: Layout, method: str, variant_dict: dict) -> P
     return root / fill_template(layout.pred_cloud_file, method=_method(method), **variant_dict)
 
 
+def oom_path(root: Path, layout: Layout, method: str, variant_dict: dict) -> Path:
+    """Where the GPU-OOM marker for `method` + a variant goes, under `root`."""
+    return root / fill_template(layout.pred_oom_file, method=_method(method), **variant_dict)
+
+
 def write_depth(path: Path, depth: np.ndarray) -> None:
     """Planar z-depth in meters, matching the gt exr convention (single channel "Z")."""
     ensure_dir(path.parent)
@@ -75,6 +80,17 @@ def write_depth(path: Path, depth: np.ndarray) -> None:
         {"compression": OpenEXR.ZIP_COMPRESSION, "type": OpenEXR.scanlineimage},
         {"Z": np.ascontiguousarray(depth, dtype=np.float32)},
     ).write(str(path))
+
+
+def write_oom(path: Path, message: str) -> None:
+    """Record that this variant hit a GPU OOM while running, with the exception text for context."""
+    ensure_dir(path.parent)
+    path.write_text(message)
+
+
+def clear_oom(path: Path) -> None:
+    """Remove a stale OOM marker once the variant it names has predictions again."""
+    path.unlink(missing_ok=True)
 
 
 def write_cloud(path: Path, points: np.ndarray, colors: np.ndarray | None = None) -> None:

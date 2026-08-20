@@ -38,6 +38,13 @@ class Layout:
     # The config a baseline ran with, written once per method (see baselines/common/runner.py).
     # Not a variant template: it records the whole run, every variant of it included.
     pred_config_file: str = "predictions/{method}/config.yaml"
+    # Marker left when a baseline hits a GPU OOM predicting this variant -- same axes as
+    # pred_cloud_file (a leaf file, not a dir), so a later scan can tell "never run" apart from
+    # "ran and ran out of memory" without re-running anything. Contains the exception text.
+    pred_oom_file: tuple = (
+        "predictions/{method}/{illumination}/oom/soil={soil},traj={traj}.txt",
+        "predictions/{method}/{illumination}/oom/ref={reflectivity},traj={traj}.txt",
+    )
     # A colmap run's folder for one variant, one {mode} (e.g. "no_gt") at a time -- same
     # illumination/soil/reflectivity axes as pred_depth_dir and for the same reason: colmap runs
     # SfM from rgb, so a different illumination or soil level is a genuinely different

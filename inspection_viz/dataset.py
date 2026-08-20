@@ -136,6 +136,7 @@ class AssetDataset:
             (d / "dense" / "fused.ply", b) for d, b in self._colmap_dirs
             if (d / "dense" / "fused.ply").is_file()
         ]
+        self._pred_ooms = _walk_template(self.root, layout.pred_oom_file, files=True)
         mesh_pat = segment_patterns(layout.mesh_file)[0]
         self.meshes = {
             m.groupdict().get("kind", f.stem): f
@@ -207,6 +208,11 @@ class AssetDataset:
     def cloud_path(self, variant: Variant, method: str) -> Path | None:
         """The fused .ply a baseline wrote for this variant, or None if it didn't write one."""
         return self._match(self._pred_clouds, {**variant.as_dict(), "method": method})
+
+    def oom_path(self, variant: Variant, method: str) -> Path | None:
+        """The marker a baseline's run left after hitting a GPU OOM on this variant, or None if
+        it never did (or the marker was cleared by a later successful run)."""
+        return self._match(self._pred_ooms, {**variant.as_dict(), "method": method})
 
     def sequence(self, variant: Variant, source: str = "gt") -> Sequence:
         """Frames for `variant`. `source` is "gt" or one of `self.methods`, selecting whether

@@ -12,12 +12,18 @@ assume the baseline config had `output.cloud: true` (the default for every basel
 baselines/configs/ as of writing); a variant run with clouds disabled will always show as
 NOT STARTED here even if its depth/cam output is complete.
 
+If a baseline hit a GPU OOM (see baselines.common.runner.run_baseline) on any variant of an asset,
+that overrides everything else for that asset/baseline: the summary just reads OOM, since the
+variants it did finish before the OOM aren't a meaningful COMPLETE/PARTIAL/NOT STARTED picture of
+that asset for that baseline. --verbose lists which variant(s) triggered it.
+
 Usage:
     python check_completion_status.py
     python check_completion_status.py --eccv-root /home/shared/eccv_2026_data
     python check_completion_status.py --baseline vggt --baseline pi3   # only these baselines
     python check_completion_status.py --asset old_house                # only this asset
     python check_completion_status.py --verbose                        # list missing variants too
+    python check_completion_status.py --example                        # only the example sequence
 
 Needs only this repo's own light dependencies (inspection_viz -- see requirements.txt), not any
 baseline's own heavy ones (torch, cv2, ...), so it runs fine directly on the host.
@@ -31,6 +37,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from baselines import registry
+from baselines.common.config import example_filters
 from inspection_viz.dataset import AssetDataset, Variant
 
 DEFAULT_ECCV_ROOT = Path("/home/shared/eccv_2026_data")
@@ -40,6 +47,7 @@ DEFAULT_ECCV_ROOT = Path("/home/shared/eccv_2026_data")
 class Status:
     total: int             # every variant the asset has
     done: list[Variant]     # variants with a saved cloud from this method
+    oom: list[Variant]      # variants with no cloud, but a marker saying why: a GPU OOM
 
     @property
     def state(self) -> str:
@@ -51,6 +59,8 @@ class Status:
 
     @property
     def summary(self) -> str:
+        if self.oom:
+            return "OOM"
         return f"{self.state} ({len(self.done)}/{self.total})"
 
 
@@ -74,9 +84,10 @@ def discover_assets(eccv_root: Path, only: set[str] | None) -> list[AssetDataset
     return assets
 
 
-def compute_status(ds: AssetDataset, method: str) -> Status:
-    done = [v for v in ds.variants if ds.cloud_path(v, method) is not None]
-    return Status(total=len(ds.variants), done=done)
+def compute_status(ds: AssetDataset, method: str, variants: list[Variant]) -> Status:
+    done = [v for v in variants if ds.cloud_path(v, method) is not None]
+    oom = [v for v in variants if v not in done and ds.oom_path(v, method) is not None]
+    return Status(total=len(variants), done=done, oom=oom)
 
 
 def main(argv=None) -> None:
@@ -90,6 +101,10 @@ def main(argv=None) -> None:
                    help="only check this asset by folder name (repeatable); default: every one found")
     p.add_argument("--verbose", action="store_true",
                    help="list the specific variants missing a cloud for any non-COMPLETE result")
+    p.add_argument("--example", action="store_true",
+                   help="only check the one sequence pinned in "
+                        "baselines/configs/data_example/<asset>.yaml (traj/illumination/soil), "
+                        "instead of every variant found")
     args = p.parse_args(argv)
 
     methods = args.baselines or registry.available()
@@ -104,23 +119,44 @@ def main(argv=None) -> None:
     if not assets:
         raise SystemExit(f"no assets with sequences found under {args.eccv_root}"
                          + (f" matching {sorted(only)}" if only else ""))
+
+    filters = example_filters() if args.example else {}
+    variants_by_asset = {}
+    kept = []
+    for ds in assets:
+        variants = [v for v in ds.variants
+                    if all(getattr(v, f) == val for f, val in filters.items() if val is not None)]
+        if args.example and not variants:
+            print(f"  skipping {ds.root.name}: no variant matches the example filter",
+                  file=sys.stderr)
+            continue
+        variants_by_asset[ds.root.name] = variants
+        kept.append(ds)
+    assets = kept
+    if not assets:
+        raise SystemExit(f"no assets have a variant matching the example filter under "
+                         f"{args.eccv_root}")
     print()
 
-    # One row per asset, one column per baseline.
+    results = {}  # (asset, method) -> Status
+    for ds in assets:
+        for method in methods:
+            results[ds.root.name, method] = compute_status(ds, method, variants_by_asset[ds.root.name])
+
+    # One row per asset, one column per baseline; sized from what actually got computed above, since
+    # an OOM annotation can make a summary longer than a bare "COMPLETE (00/00)".
     name_w = max(len(ds.root.name) for ds in assets)
-    col_w = max(len("COMPLETE (00/00)"), *(len(m) for m in methods)) + 1
+    col_w = max(len("COMPLETE (00/00)"), *(len(m) for m in methods),
+               *(len(s.summary) for s in results.values())) + 1
 
     header = " " * name_w + "  " + "  ".join(m.ljust(col_w) for m in methods)
     print(header)
     print("-" * len(header))
 
-    results = {}  # (asset, method) -> Status
     for ds in assets:
         row = [ds.root.name.ljust(name_w)]
         for method in methods:
-            status = compute_status(ds, method)
-            results[ds.root.name, method] = status
-            row.append(status.summary.ljust(col_w))
+            row.append(results[ds.root.name, method].summary.ljust(col_w))
         print("  ".join(row))
 
     if args.verbose:
@@ -129,8 +165,12 @@ def main(argv=None) -> None:
             if status.state == "COMPLETE":
                 continue
             missing_any = True
-            ds = next(d for d in assets if d.root.name == asset)
-            missing = sorted(set(ds.variants) - set(status.done), key=str)
+            if status.oom:
+                print(f"\n{asset} / {method}: OOM, hit on:")
+                for v in sorted(status.oom, key=str):
+                    print(f"  - {v.as_dict()}")
+                continue
+            missing = sorted(set(variants_by_asset[asset]) - set(status.done), key=str)
             print(f"\n{asset} / {method}: {status.summary}, missing clouds for:")
             for v in missing:
                 print(f"  - {v.as_dict()}")
