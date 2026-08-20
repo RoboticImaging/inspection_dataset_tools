@@ -11,6 +11,7 @@ on the view that a run known to have failed partway through an asset shouldn't h
 it did finish read as the whole picture. See `oom_variants`.
 """
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -74,10 +75,19 @@ class Results:
         return [p for t in self.tables.values() if len(t) for p in t.write(out_dir, formats)]
 
 
+def _normpath(path: str | Path) -> Path:
+    """Absolute and `.`/`..`-collapsed, like `Path.resolve()` -- but unlike it, symlinks are left
+    alone. `predictions/` is sometimes symlinked out to separate storage (a bigger disk, say), and
+    `target_from_path` finds the asset root by going `.parent.parent` from a method folder; fully
+    resolving first would walk through that symlink and land two levels up *inside the other
+    storage*, not at the asset root the symlink itself lives under."""
+    return Path(os.path.abspath(Path(path).expanduser()))
+
+
 def target_from_path(path: str | Path, layout: Layout = Layout()) -> Target:
     """`.../old_house/predictions/da3` -> the asset dataset plus the method name "da3".
     `.../old_house/colmap/no_gt` -> the same, with method name "colmap/no_gt"."""
-    path = Path(path).expanduser().resolve()
+    path = _normpath(path)
     if not path.is_dir():
         raise FileNotFoundError(path)
     if path.parent.name == PREDICTIONS_DIR:
@@ -95,7 +105,7 @@ def targets_from_paths(paths, layout: Layout = Layout()) -> list[Target]:
     found inside."""
     out, seen = [], set()
     for raw in paths:
-        path = Path(raw).expanduser().resolve()
+        path = _normpath(raw)
         for method_dir in _expand(path):
             target = target_from_path(method_dir, layout)
             key = (target.dataset.root, target.method)
