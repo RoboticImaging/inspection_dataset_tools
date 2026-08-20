@@ -13,7 +13,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from inspection_eval import evaluate, frame_gaps, metrics, targets_from_paths
+from baselines.common.config import example_filters
+from inspection_eval import evaluate, frame_gaps, metrics, oom_variants, targets_from_paths
 from inspection_eval.case import ALIGN_MODES
 from inspection_eval.report import FORMATS, read_tables
 from inspection_eval.runner import case_key
@@ -62,12 +63,21 @@ def parse_args(argv=None):
     p.add_argument("--set", action="append", default=[], metavar="METRIC.OPTION=VALUE",
                    help="override a metric option, e.g. --set depth.scale=median "
                         "--set cloud.thresholds=0.1,0.5 (repeatable)")
+    p.add_argument("--example", action="store_true",
+                   help="evaluate only the one sequence pinned in "
+                        "baselines/configs/data_example/<asset>.yaml "
+                        "(traj/illumination/soil); can't be combined with an explicit "
+                        "--traj/--illumination/--soil/--reflectivity")
     for field in ("traj", "illumination", "soil", "reflectivity"):
         p.add_argument(f"--{field}", default=None, help=f"only evaluate variants with this {field}")
     p.add_argument("--list-metrics", action="store_true",
                    help="print the registered metrics with their options and exit")
     p.add_argument("-q", "--quiet", action="store_true", help="only print the tables")
-    return p.parse_args(argv)
+    args = p.parse_args(argv)
+    if args.example and any(getattr(args, f) is not None
+                            for f in ("traj", "illumination", "soil", "reflectivity")):
+        p.error("--example can't be combined with --traj/--illumination/--soil/--reflectivity")
+    return args
 
 
 def parse_overrides(items) -> dict:
@@ -168,6 +178,13 @@ def ask_about(out_dir: Path, cases: int) -> str:
             raise SystemExit("aborted, nothing was changed")
 
 
+def describe_oom(oom) -> str:
+    pairs = sorted({(o.dataset.root.name, o.method) for o in oom})
+    lines = [f"  {asset} / {method}" for asset, method in pairs]
+    return (f"{len(pairs)} asset/method combo(s) hit a GPU OOM: every variant of each is reported "
+           "as OOM below rather than scored:\n" + "\n".join(lines))
+
+
 def describe_gaps(gaps) -> str:
     lines = [f"  {g.dataset.root.name} / {g.source} / {g.variant}: {g.field} missing for "
             f"frame(s) {', '.join(map(str, g.indices))}" for g in gaps]
@@ -228,8 +245,14 @@ def main(argv=None) -> int:
 
     targets = targets_from_paths(args.predictions)
     names = [n.strip() for n in args.metrics.split(",")] if args.metrics else None
-    filters = {"traj": args.traj, "illumination": args.illumination,
-               "soil": args.soil, "reflectivity": args.reflectivity}
+    filters = example_filters() if args.example else {
+        "traj": args.traj, "illumination": args.illumination,
+        "soil": args.soil, "reflectivity": args.reflectivity,
+    }
+
+    oom = oom_variants(targets, filters)
+    if oom:
+        print(describe_oom(oom), file=sys.stderr)
 
     out_dir = out_folder(args, targets)
     resume = start_from(out_dir, args)  # asked before anything long runs
