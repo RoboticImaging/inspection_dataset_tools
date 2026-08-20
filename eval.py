@@ -102,15 +102,18 @@ def list_metrics() -> None:
             print(f"    {metric.name}.{field.name} = {getattr(metric.default_options(), field.name)!r}")
 
 
-def run_label(targets) -> str:
+def run_label(targets, example: bool = False) -> str:
     """A short, readable tag for what `targets` covers, e.g. "old_house-da3" or, for a wildcard
-    run over several methods, "old_house-da3+vggt". Used to name the output folder so that
-    `eval_results/` stays browsable instead of filling up with bare timestamps."""
+    run over several methods, "old_house-da3+vggt" -- "-example" appended when `--example` picked
+    the variant instead of a real sweep, so that run isn't mistaken for a full one later. Used to
+    name the output folder so that `eval_results/` stays browsable instead of filling up with bare
+    timestamps."""
     assets = sorted({t.dataset.root.name for t in targets})
     # a colmap method's name has a "/" in it (e.g. "colmap/no_gt"); flattened here so it names one
     # folder rather than nesting one, the only place that slash would otherwise reach a filesystem
     methods = sorted({t.method.replace("/", "-") for t in targets})
-    return f"{_join(assets, 'assets')}-{_join(methods, 'methods')}"
+    label = f"{_join(assets, 'assets')}-{_join(methods, 'methods')}"
+    return f"{label}-example" if example else label
 
 
 def _join(names: list, plural: str, limit: int = 3) -> str:
@@ -125,7 +128,7 @@ def out_folder(args, targets) -> Path:
         return args.out / args.name
     if args.no_timestamp:
         return args.out
-    return args.out / f"{run_label(targets)}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    return args.out / f"{run_label(targets, args.example)}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
 
 
 def start_from(out_dir: Path, args) -> dict:
