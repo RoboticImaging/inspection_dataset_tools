@@ -8,6 +8,8 @@ from . import io
 from .camera import Camera
 from .config import Layout, segment_patterns
 
+COLMAP_PREFIX = "colmap/"  # a colmap run's method name is this plus its {mode}, e.g. "colmap/no_gt"
+
 
 @dataclass(frozen=True)
 class Variant:
@@ -123,7 +125,17 @@ class AssetDataset:
         self._cam_dirs = _walk_template(self.root, layout.cam_dir)
         self._pred_depth_dirs = _walk_template(self.root, layout.pred_depth_dir)
         self._pred_cam_dirs = _walk_template(self.root, layout.pred_cam_dir)
-        self._pred_clouds = _walk_template(self.root, layout.pred_cloud_file, files=True)
+        # A colmap run's folder is keyed by {mode} rather than {method}; folded into the same
+        # "method" key as every other prediction source so the rest of this class need not know
+        # colmap is any different. Its fused cloud lives at a fixed path inside that folder
+        # rather than one matched by its own template, so it is appended to _pred_clouds here.
+        self._colmap_dirs = [(d, {**{k: v for k, v in b.items() if k != "mode"},
+                                  "method": f"{COLMAP_PREFIX}{b['mode']}"})
+                             for d, b in _walk_template(self.root, layout.colmap_dir)]
+        self._pred_clouds = _walk_template(self.root, layout.pred_cloud_file, files=True) + [
+            (d / "dense" / "fused.ply", b) for d, b in self._colmap_dirs
+            if (d / "dense" / "fused.ply").is_file()
+        ]
         mesh_pat = segment_patterns(layout.mesh_file)[0]
         self.meshes = {
             m.groupdict().get("kind", f.stem): f
@@ -158,15 +170,19 @@ class AssetDataset:
 
     @property
     def methods(self) -> list[str]:
-        """Baseline prediction sources found under predictions/ (e.g. ["da3"])."""
-        return sorted({b["method"] for _, b in self._pred_depth_dirs if "method" in b})
+        """Baseline prediction sources found under predictions/ (e.g. ["da3"]) plus any colmap
+        run found under colmap/ (e.g. ["colmap/no_gt"])."""
+        return sorted({b["method"] for _, b in self._pred_depth_dirs if "method" in b} |
+                     {b["method"] for _, b in self._colmap_dirs})
 
     def prediction_variants(self, method: str) -> list[Variant]:
-        """Variants `method` has predictions for — anything it wrote (depth, cams or a fused
-        cloud) counts, so a partially-written run is still discoverable."""
+        """Variants `method` has predictions for — anything it wrote (depth, cams, a fused cloud,
+        or -- for a colmap method -- its whole reconstruction folder) counts, so a
+        partially-written run is still discoverable."""
         found = {
             Variant(b.get("traj"), b.get("illumination"), b.get("soil"), b.get("reflectivity"))
-            for entries in (self._pred_depth_dirs, self._pred_cam_dirs, self._pred_clouds)
+            for entries in (self._pred_depth_dirs, self._pred_cam_dirs, self._pred_clouds,
+                            self._colmap_dirs)
             for _, b in entries if b.get("method") == method
         }
         return sorted(found, key=str)
@@ -201,6 +217,15 @@ class AssetDataset:
             raise KeyError(f"no data for {variant}")
         lay = self.layout
         rgb = _index_frames(rgb_dir, lay.rgb_exts, self._frame_id)
+        if source.startswith(COLMAP_PREFIX):
+            from .colmap import ColmapFrame, Reconstruction  # optional dep (pycolmap); load lazily
+
+            colmap_dir = self._match(self._colmap_dirs, {**variant.as_dict(), "method": source})
+            if colmap_dir is None:
+                raise KeyError(f"no predictions for method={source!r}, {variant}")
+            recon = Reconstruction.load(colmap_dir, lay.frame_id)
+            frames = [ColmapFrame(i, rgb[i], recon, lay) for i in sorted(rgb)]
+            return Sequence(variant, frames)
         if source == "gt":
             depth_dir = self._match(self._depth_dirs, variant.as_dict())
             cam_dir = self._match(self._cam_dirs, variant.as_dict())

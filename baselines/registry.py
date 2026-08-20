@@ -16,11 +16,13 @@ BASELINES = {
     "da3": "baselines.depth_anything_3.run_sequence:DepthAnything3",
     "da3_streaming": "baselines.da3_streaming.run_sequence:DA3Streaming",
     "vggt": "baselines.vggt.run_sequence:VGGT",
+    "vggt-omega": "baselines.vggt-omega.run_sequence:VGGTOmega",
     "pi3": "baselines.Pi3.run_sequence:Pi3",
     "pi3x": "baselines.Pi3X.run_sequence:Pi3X",
     "vggt-slam": "baselines.VGGT-SLAM.run_sequence:VGGTSLAM",
     "vggt-long": "baselines.VGGT-Long.run_sequence:VGGTLong",
     "mpsfm": "baselines.mpsfm.run_sequence:MPSfM",
+    "pi-long": "baselines.Pi-Long.run_sequence:PiLong",
 }
 
 

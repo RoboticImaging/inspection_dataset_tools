@@ -90,6 +90,52 @@ def make_predictions(root: Path, layout: Layout, method: str, binds: dict,
         write_cloud_ply(ply)
 
 
+def write_array(path: Path, arr: np.ndarray):
+    """Inverse of `inspection_viz.colmap.read_array`, for building depth-map fixtures in the
+    same binary format colmap's dense stereo writes."""
+    arr = np.asarray(arr, dtype=np.float32)
+    if arr.ndim == 2:
+        arr = arr[:, :, None]
+    h, w, c = arr.shape
+    with open(path, "wb") as f:
+        f.write(f"{w}&{h}&{c}&".encode("ascii"))
+        f.write(np.asfortranarray(np.transpose(arr, (1, 0, 2))).tobytes(order="F"))
+
+
+def make_colmap(root: Path, layout: Layout, mode: str, binds: dict, n_frames=3, wh=WH,
+                depth_value=5.0, cloud=True, unregistered=()) -> Path:
+    """Write a synthetic colmap `<mode>` run for one variant: a real (tiny) pycolmap sparse
+    model under dense/sparse, a depth .bin per registered frame, and a fused .ply -- the same
+    shape `inspection_viz.colmap.Reconstruction` reads out of a real colmap run. `unregistered`
+    drops those frame indices from the model, the way colmap itself drops frames it couldn't
+    register."""
+    import pycolmap
+
+    dense = root / fill_template(layout.colmap_dir, mode=mode, **binds) / "dense"
+    depth_dir = dense / "stereo" / "depth_maps"
+    depth_dir.mkdir(parents=True, exist_ok=True)
+
+    w, h = wh
+    rec = pycolmap.Reconstruction()
+    rec.add_camera_with_trivial_rig(
+        pycolmap.Camera.create_from_model_id(1, pycolmap.CameraModelId.SIMPLE_PINHOLE, 50.0, w, h))
+    for i in range(n_frames):
+        if i in unregistered:
+            continue
+        name = f"{i:08d}.jpg"
+        image = pycolmap.Image(name=name, camera_id=1, image_id=i + 1)
+        rec.add_image_with_trivial_frame(image)
+        w2c = pycolmap.Rigid3d(pycolmap.Rotation3d(np.eye(3)), np.array([0.0, 0.0, 5.0]))
+        rec.image(image.image_id).frame.set_cam_from_world(1, w2c)
+        rec.register_frame(rec.image(image.image_id).frame_id)
+        write_array(depth_dir / f"{name}.photometric.bin", np.full((h, w), depth_value, np.float32))
+    (dense / "sparse").mkdir(parents=True, exist_ok=True)
+    rec.write(dense / "sparse")
+    if cloud:
+        write_cloud_ply(dense / "fused.ply")
+    return dense.parent
+
+
 @pytest.fixture
 def asset(tmp_path):
     return make_asset(tmp_path / "asset")

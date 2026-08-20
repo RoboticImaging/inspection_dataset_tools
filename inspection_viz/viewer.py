@@ -1,12 +1,14 @@
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import cv2
 import numpy as np
 import viser
 
-from .dataset import AssetDataset, Variant
+from .align import Sim3, fit_cameras
+from .dataset import AssetDataset, Sequence, Variant
 from .io import read_cloud
 from .mesh import load_mesh_for_vis
 
@@ -29,6 +31,17 @@ def colorize_depth(depth: np.ndarray, lo: float, hi: float) -> np.ndarray:
     return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
 
+def _finite_cams(seq: Sequence) -> dict:
+    """index -> Camera, skipping frames with no pose and the odd nan one (see EvalCase's own
+    `_usable_cam` -- same reasoning: a nan here would poison the Sim3 fit for every frame)."""
+    out = {}
+    for f in seq:
+        cam = f.camera()
+        if cam is not None and np.all(np.isfinite(cam.c2w)):
+            out[f.index] = cam
+    return out
+
+
 class Viewer:
     def __init__(self, dataset: AssetDataset | str | Path | None = None,
                  port: int = 8080, mesh_max_faces: int = MESH_MAX_FACES):
@@ -41,6 +54,8 @@ class Viewer:
         self._clouds = {}     # frame idx -> handle | None
         self._meshes = {}     # mesh kind -> handle | None (None = bake in flight)
         self._cloud_file = None    # fused .ply of the current variant+source, if the baseline wrote one
+        self._transform = Sim3()   # source -> gt gauge (see _fit_transform); identity until loaded
+        self._aligned = False      # whether _transform is a real fit, vs. the identity fallback
         self._fused = None         # its handle (see _ensure_fused)
         self._fused_pts = None     # its parsed (points, colors), kept across stride changes
         self._fused_pending = None  # path of an in-flight fused-cloud read
@@ -58,7 +73,8 @@ class Viewer:
         if not self.seq:
             return
         cams = [f.camera() for f in (self.seq[0], self.seq[len(self.seq) // 2])]
-        center = np.mean([c.position for c in cams if c], axis=0) if any(cams) else np.zeros(3)
+        positions = [self._transform.points(c.position[None])[0] for c in cams if c]
+        center = np.mean(positions, axis=0) if positions else np.zeros(3)
         client.camera.position = center + np.array([40.0, 40.0, 30.0])
         client.camera.look_at = center - np.array([0.0, 0.0, 10.0])
 
@@ -77,8 +93,13 @@ class Viewer:
             self._axis = g.add_button_group("Vary", ("soil",))
             self._axis_value = g.add_dropdown("Soil", ["-"])
             self._source = g.add_dropdown("Source", ["gt"])
+            self._align = g.add_checkbox(
+                "Align to gt", True,
+                hint="fit a similarity transform (rotation + scale + translation) to whatever "
+                     "camera poses this source shares with gt, so switching sources doesn't "
+                     "need a re-navigate -- off shows the source exactly as it was written")
         with g.add_folder("View"):
-            self._mode = g.add_dropdown("Mode", ("Timeline", "All frames"))
+            self._mode = g.add_dropdown("Mode", ("Timeline", "All frames"), initial_value="All frames")
             self._frame = g.add_slider("Frame", min=0, max=1, step=1, initial_value=0)
             self._play = g.add_checkbox("Play", False)
             self._fps = g.add_slider("FPS", min=1, max=30, step=1, initial_value=10)
@@ -99,6 +120,7 @@ class Viewer:
         self._axis.on_click(lambda _: self._suspend or self._on_axis_change())
         self._axis_value.on_update(lambda _: self._suspend or self._load_sequence())
         self._source.on_update(lambda _: self._suspend or self._load_sequence())
+        self._align.on_update(lambda _: self._suspend or self._realign())
         for h in (self._mode, self._show_frustums, self._geometry, self._frame_step, self._accumulate):
             h.on_update(lambda _: self._suspend or self._refresh())
         self._frame.on_update(lambda _: self._refresh())
@@ -199,22 +221,55 @@ class Viewer:
                 self._status.content = "no asset loaded — enter a path above"
                 return
             v, source = self._variant(), self._source.value
+            error = None
             try:
                 self.seq = self.ds.sequence(v, source) if self.ds.has(v) else None
-            except KeyError:
-                self.seq = None
+            except Exception as e:  # a bad colmap folder (or pycolmap missing) must not wedge the gui
+                self.seq, error = None, e
             n = len(self.seq) if self.seq else 0
             self._frame.max = max(1, n - 1)
             self._frame.value = min(self._frame.value, max(0, n - 1))
             if not self.seq:
-                self._status.content = f"no data for {v.as_dict()} (source={source})"
+                self._status.content = (f"cannot load {source}: {error}" if error is not None
+                                        else f"no data for {v.as_dict()} (source={source})")
                 return
+            self._update_transform(v, source)
             n_depth = sum(f.depth_path is not None for f in self.seq)
             n_cam = sum(f.cam_path is not None for f in self.seq)
             self._cloud_file = self.ds.cloud_path(v, source) if source != "gt" else None
             self._counts = f"{n} frames · depth {n_depth}/{n} · cams {n_cam}/{n}"
             if self._cloud_file is not None:
                 self._counts += " · fused cloud"
+            self._refresh()
+
+    def _fit_transform(self, v: Variant, source: str) -> tuple[Sim3, bool]:
+        """The Sim3 that puts `source`'s cameras (already loaded as `self.seq`) into gt's gauge,
+        fitted to whatever frames the two share -- so switching sources on screen doesn't need a
+        re-navigate. Identity, and reported as unaligned, when that's off, this already is gt, or
+        too few poses overlap to fix a rotation (see `fit_cameras`)."""
+        if source == "gt" or not self._align.value:
+            return Sim3(), False
+        try:
+            gt_cams = _finite_cams(self.ds.sequence(v, "gt"))
+        except Exception:
+            return Sim3(), False
+        src_cams = _finite_cams(self.seq)
+        return fit_cameras(src_cams, gt_cams), len(src_cams.keys() & gt_cams.keys()) >= 3
+
+    def _update_transform(self, v: Variant, source: str):
+        self._transform, self._aligned = self._fit_transform(v, source)
+
+    def _realign(self):
+        """"Align to gt" toggled: re-fit (or drop) the transform and rebuild the scene objects
+        whose position it's baked into, without re-reading rgb/depth/the fused .ply from disk."""
+        with self._lock:
+            if not self.seq:
+                return
+            self._update_transform(self._variant(), self._source.value)
+            for h in (*self._frustums.values(), *self._clouds.values(), self._fused):
+                if h is not None:
+                    h.remove()
+            self._frustums, self._clouds, self._fused = {}, {}, None
             self._refresh()
 
     def _reset_clouds(self):
@@ -272,7 +327,13 @@ class Viewer:
             if fused and self._fused is not None:
                 live.append(self._fused)
             n_pts = sum(h.points.shape[0] for h in live)
-            self._status.content = f"{self._counts} · {n_pts:,} pts"
+            self._status.content = f"{self._counts} · {n_pts:,} pts{self._align_note()}"
+
+    def _align_note(self) -> str:
+        if self._source.value == "gt" or not self._align.value:
+            return ""
+        return (f" · aligned to gt (×{self._transform.scale:.3g})" if self._aligned
+               else " · not aligned (< 3 poses shared with gt)")
 
     def _ensure_frustum(self, i: int):
         if i in self._frustums:
@@ -280,6 +341,7 @@ class Viewer:
         cam = self.seq[i].camera()
         if cam is None:
             return
+        cam = replace(cam, c2w=self._transform.c2w(cam.c2w))  # source gauge -> gt gauge, if aligned
         self._frustums[i] = self.server.scene.add_camera_frustum(
             f"/frustums/{i:04d}", fov=cam.fov_y, aspect=cam.aspect,
             scale=self._frustum_scale.value, image=_resize(self.seq[i].rgb(), FRUSTUM_IMG_W),
@@ -295,6 +357,7 @@ class Viewer:
             self._clouds[i] = None
             return
         pts, colors = cam.unproject(depth, rgb=frame.rgb(), stride=self._stride.value)
+        pts = self._transform.points(pts)  # unproject in the camera's own gauge, then align it
         self._clouds[i] = self.server.scene.add_point_cloud(
             f"/clouds/{i:04d}", points=pts.astype(np.float32),
             colors=colors if colors is not None else np.full_like(pts, 180, dtype=np.uint8),
@@ -340,7 +403,9 @@ class Viewer:
 
     def _add_fused(self, pts: np.ndarray, colors: np.ndarray | None):
         s = self._stride.value ** 2  # per-frame stride thins a 2d grid; square it to thin as much
-        pts = pts[::s]
+        # `_fused_pts` (this method's caller) caches the .ply exactly as read -- unaligned -- so
+        # toggling "Align to gt" only needs to re-run this transform, not re-read the file.
+        pts = self._transform.points(pts[::s]).astype(np.float32)
         self._fused = self.server.scene.add_point_cloud(
             "/clouds/fused", points=pts,
             colors=colors[::s] if colors is not None else np.full_like(pts, 180, dtype=np.uint8),

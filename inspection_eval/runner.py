@@ -10,13 +10,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from inspection_viz.config import Layout
-from inspection_viz.dataset import AssetDataset, Variant
+from inspection_viz.dataset import COLMAP_PREFIX, AssetDataset, Variant
 
 from . import metrics as metrics_pkg
 from .case import EvalCase
 from .report import Table
 
 PREDICTIONS_DIR = "predictions"
+COLMAP_DIR = "colmap"  # <asset>/colmap/<mode> stands for a method the same way predictions/<method> does
 
 
 @dataclass
@@ -58,37 +59,49 @@ class Results:
 
 
 def target_from_path(path: str | Path, layout: Layout = Layout()) -> Target:
-    """`.../old_house/predictions/da3` -> the asset dataset plus the method name "da3"."""
+    """`.../old_house/predictions/da3` -> the asset dataset plus the method name "da3".
+    `.../old_house/colmap/no_gt` -> the same, with method name "colmap/no_gt"."""
     path = Path(path).expanduser().resolve()
     if not path.is_dir():
         raise FileNotFoundError(path)
-    if path.parent.name != PREDICTIONS_DIR:
-        raise ValueError(
-            f"{path} does not look like a prediction folder: expected "
-            f"<asset>/{PREDICTIONS_DIR}/<method>")
-    return Target(AssetDataset(path.parent.parent, layout), path.name)
+    if path.parent.name == PREDICTIONS_DIR:
+        return Target(AssetDataset(path.parent.parent, layout), path.name)
+    if path.parent.name == COLMAP_DIR:
+        return Target(AssetDataset(path.parent.parent, layout), f"{COLMAP_PREFIX}{path.name}")
+    raise ValueError(
+        f"{path} does not look like a prediction folder: expected "
+        f"<asset>/{PREDICTIONS_DIR}/<method> or <asset>/{COLMAP_DIR}/<mode>")
 
 
 def targets_from_paths(paths, layout: Layout = Layout()) -> list[Target]:
-    """Every method named by `paths`. A path may be one method's folder, or the `predictions`
-    dir / the asset root above it, which stand for every method inside."""
+    """Every method named by `paths`. A path may be one method's folder, the `predictions` or
+    `colmap` dir, or the asset root above them -- the latter two stand for every method/mode
+    found inside."""
     out, seen = [], set()
     for raw in paths:
         path = Path(raw).expanduser().resolve()
-        if path.name == PREDICTIONS_DIR or (path / PREDICTIONS_DIR).is_dir():
-            root = path if path.name == PREDICTIONS_DIR else path / PREDICTIONS_DIR
-            found = sorted(d for d in root.iterdir() if d.is_dir())
-            if not found:
-                raise FileNotFoundError(f"no methods under {root}")
-        else:
-            found = [path]
-        for method_dir in found:
+        for method_dir in _expand(path):
             target = target_from_path(method_dir, layout)
             key = (target.dataset.root, target.method)
             if key not in seen:
                 seen.add(key)
                 out.append(target)
     return out
+
+
+def _expand(path: Path) -> list[Path]:
+    if path.name in (PREDICTIONS_DIR, COLMAP_DIR):
+        found = sorted(d for d in path.iterdir() if d.is_dir())
+        if not found:
+            raise FileNotFoundError(f"no methods under {path}")
+        return found
+    groups = [path / name for name in (PREDICTIONS_DIR, COLMAP_DIR) if (path / name).is_dir()]
+    if not groups:
+        return [path]
+    found = sorted(d for g in groups for d in g.iterdir() if d.is_dir())
+    if not found:
+        raise FileNotFoundError(f"no methods under {', '.join(str(g) for g in groups)}")
+    return found
 
 
 def variants(target: Target, **filters) -> list[Variant]:

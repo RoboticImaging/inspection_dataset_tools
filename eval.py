@@ -97,7 +97,9 @@ def run_label(targets) -> str:
     run over several methods, "old_house-da3+vggt". Used to name the output folder so that
     `eval_results/` stays browsable instead of filling up with bare timestamps."""
     assets = sorted({t.dataset.root.name for t in targets})
-    methods = sorted({t.method for t in targets})
+    # a colmap method's name has a "/" in it (e.g. "colmap/no_gt"); flattened here so it names one
+    # folder rather than nesting one, the only place that slash would otherwise reach a filesystem
+    methods = sorted({t.method.replace("/", "-") for t in targets})
     return f"{_join(assets, 'assets')}-{_join(methods, 'methods')}"
 
 
