@@ -19,6 +19,9 @@
 [submodule "Pi-Long"]
 	path = Pi-Long
 	url = git@github.com:DengKaiCQ/Pi-Long.git
+[submodule "mpsfm"]
+	path = mpsfm
+	url = git@github.com:cvg/mpsfm.git
 [submodule "vggt-omega"]
 	path = vggt-omega
 	url = https://github.com/facebookresearch/vggt-omega.git

@@ -1,0 +1,33 @@
+# Baseline config for MP-SfM: its own knobs, nothing about which data to run on.
+# Reusable across assets — pair it with a data config from configs/data/:
+#
+#   python run_sequence.py --data ../configs/data/old_house.yaml --model ../configs/mpsfm.yaml
+#
+# Every field has a default in run_sequence.py's dataclasses; only override what you need.
+# A copy of this, plus the data config and the variants that ran, is written to
+# <asset>/predictions/<method>/config.yaml after each run.
+
+model:
+  # Name of a config under mpsfm/configs/ (no path, no .yaml) -- picks the feature matcher and
+  # monocular depth/normal prior combination. See that directory, or the submodule's own README
+  # ("Our favorite configurations"), for the full set of options.
+  conf: sp-lg_m3dv2
+  extract: []                   # priors to force re-extraction of; [] reuses this run's own cache
+  verbose: 0
+
+output:
+  # -> predictions/{method}/{illumination}/{depths,cam_params}/soil={soil},traj={traj}/
+  #    predictions/{method}/{illumination}/clouds/soil={soil},traj={traj}.ply
+  # (keyed by the full variant, so runs on different illumination/soil never overwrite each other)
+  #
+  # Unlike the feed-forward baselines: MP-SfM is classical incremental SfM, not a depth model --
+  # but it does write real depth, refined (not predicted) from its own monocular prior during
+  # registration/bundle adjustment (see run_sequence.py's read_refined_depth). Only frames it
+  # actually registered get written at all -- a frame it couldn't place gets no output, not a bad
+  # guess -- and a registered frame whose depth was never activated still falls back to all-NaN.
+  # Pose and cloud are fully written and scored either way.
+  method: null                  # null = the baseline's registered name ("mpsfm"); set it to run
+                                # two configurations of the same baseline side by side
+  overwrite: false              # false = skip sequences that already have predictions
+  min_confidence: null          # MP-SfM produces no per-pixel confidence map -- must stay null
+  cloud: true                    # sparse point cloud triangulated by SfM, not unprojected depth

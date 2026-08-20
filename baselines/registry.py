@@ -21,6 +21,7 @@ BASELINES = {
     "pi3x": "baselines.Pi3X.run_sequence:Pi3X",
     "vggt-slam": "baselines.VGGT-SLAM.run_sequence:VGGTSLAM",
     "vggt-long": "baselines.VGGT-Long.run_sequence:VGGTLong",
+    "mpsfm": "baselines.mpsfm.run_sequence:MPSfM",
     "pi-long": "baselines.Pi-Long.run_sequence:PiLong",
 }
 
