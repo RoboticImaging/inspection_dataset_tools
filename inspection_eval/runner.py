@@ -6,9 +6,10 @@ A metric that cannot run on a case (no fused cloud, no gt depth, ...) is skipped
 alone and reported at the end, so a partially-populated prediction folder still yields a table.
 
 The exception is a GPU OOM (see `baselines.common.runner`): once any variant of an (asset, method)
-has hit one, every variant of that pair is reported as a flat "OOM" row instead of being scored,
-on the view that a run known to have failed partway through an asset shouldn't have the variants
-it did finish read as the whole picture. See `oom_variants`.
+has hit one, every variant of that pair is reported as OOM instead of being scored -- literally,
+every metric-value cell of its row reads "OOM" rather than a number -- on the view that a run known
+to have failed partway through an asset shouldn't have the variants it did finish read as the whole
+picture. See `oom_variants`.
 """
 
 import os
@@ -215,9 +216,9 @@ def evaluate(targets, metric_names=None, align_mode: str = "sim3", overrides: di
     finished — which makes "everything up to the last completed case" exactly what is skipped.
 
     A (asset, method) that hit a GPU OOM on any variant is not scored at all: every variant it
-    would otherwise cover is written as a single "OOM" row instead (in every metric's table alike),
-    since a baseline that OOM'd partway through an asset shouldn't be read as if the variants it
-    did finish are the whole picture.
+    would otherwise cover gets a row in every metric's table with "OOM" in place of every value
+    that metric would otherwise have reported, since a baseline that OOM'd partway through an
+    asset shouldn't be read as if the variants it did finish are the whole picture.
     """
     names = list(metric_names or metrics_pkg.REGISTRY)
     chosen = [metrics_pkg.get(n) for n in names]
@@ -231,6 +232,7 @@ def evaluate(targets, metric_names=None, align_mode: str = "sim3", overrides: di
     say = on_event or (lambda kind, message, **info: None)
 
     oom_targets = {(o.dataset.root, o.method) for o in oom_variants(targets, filters)}
+    oom_keys = set()
     plan = []
     for t in targets:
         if (t.dataset.root, t.method) in oom_targets:
@@ -254,8 +256,9 @@ def evaluate(targets, metric_names=None, align_mode: str = "sim3", overrides: di
             say("resumed", "  already scored, kept from the previous run")
             continue
         if is_oom:
+            oom_keys.add(case_key(case.label))
             for metric in chosen:
-                tables[metric.name].add({**case.label, "OOM": "OOM"})
+                tables[metric.name].add(dict(case.label))
             say("oom", "  OOM: this method hit a GPU OOM on this asset, nothing was scored")
         else:
             for metric in chosen:
@@ -272,6 +275,17 @@ def evaluate(targets, metric_names=None, align_mode: str = "sim3", overrides: di
                     continue
                 tables[metric.name].add({**case.label, **row})
                 say("metric", f"  {metric.name}: ok")
+        # An OOM row was only ever given its label columns (its metric couldn't be run) -- fill the
+        # rest of it with "OOM" now that this case may have taught a table about columns it didn't
+        # have before, so a number and an OOM are never visually confusable in the same column.
+        # Redone after every case (not just once at the end) so a streamed or interrupted run's
+        # on-disk table is never left showing a blank cell where "OOM" belongs.
+        for table in tables.values():
+            for row in table.rows:
+                if case_key(row) in oom_keys:
+                    for column in table.columns:
+                        if column not in LABEL_COLUMNS:
+                            row[column] = "OOM"
         if after_case:
             after_case(results)
     say("done", f"{total} case(s) scored", index=total, total=total)
