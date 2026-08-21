@@ -22,8 +22,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # Ubuntu 22.04's own `python3.11` apt package is stuck at 3.11.0rc1 (predates the final
 # release) and is missing stdlib attrs recent torch needs (e.g. sys.get_int_max_str_digits) --
 # pull a real, current 3.11 from deadsnakes instead, same as baselines/vggt/Dockerfile (this is
-# VGGT's own successor, with the same unpinned `torch>=2.3` and no compiled extensions of its
-# own -- so it shares that Dockerfile's shape almost exactly, just a different repo). Everything
+# VGGT's own successor, with no compiled extensions of its own -- so it shares that Dockerfile's
+# shape almost exactly, just a different repo and an explicit torch pin below where vggt/Dockerfile
+# instead relies on its own requirements.txt's exact `torch==2.3.1`). Everything
 # is then pip-installed into its own venv (not the system python) so it can't collide with
 # Debian-managed dist-packages (add-apt-repository itself pulls in distutils-installed python3-*
 # packages).
@@ -46,6 +47,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN pip install --no-cache-dir -U pip
 
 WORKDIR /opt/vggt-omega
+
+# Pinned torch first, same "Step 1" shape as baselines/VGGT-Long and baselines/Pi-Long's own
+# Dockerfiles -- vggt-omega/requirements.txt only floors torch at `torch>=2.3` (see the note in
+# the apt RUN above), so an unpinned `pip install -r requirements.txt` would let pip resolve
+# whatever's newest on PyPI. Today that's a build whose default Linux wheel bundles CUDA 13.0
+# (via a `cuda-toolkit` dependency), which needs a newer driver than most hosts have and fails at
+# import with "The NVIDIA driver on your system is too old". Installing an exact, cu128-indexed
+# torch/torchvision here first satisfies that floor, so requirements.txt's own install below
+# leaves them alone. cu128 matches what `nvidia-smi` reports as the driver's max supported CUDA
+# version here; bump only after confirming the host driver supports it.
+RUN pip install --no-cache-dir torch==2.9.1 torchvision==0.24.1 \
+        --index-url https://download.pytorch.org/whl/cu128
 
 # Install vggt-omega
 COPY vggt-omega/ .
