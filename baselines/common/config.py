@@ -167,6 +167,16 @@ class OutputSpec:
     # filtering and the point cap are left to whatever post-processing defaults the model's own
     # exporter uses, so the cloud matches what that model ships as its reference output.
     cloud: bool = True
+    # Read every depth frame and fused cloud back right after writing it, retrying the write
+    # (write_attempts times total) if it doesn't decode -- catches a process kill (the OS
+    # OOM-killer, a GPU driver crash, node preemption) or a storage hiccup leaving a truncated or
+    # corrupt file behind, which otherwise only surfaces much later, and much more confusingly, as
+    # a decode error during eval. Writes are always atomic regardless of this flag (see
+    # baselines.common.writer._atomic_write); this only controls the extra read-back-to-confirm
+    # step, whose cost -- a small decode per frame, milliseconds -- is negligible next to a
+    # frame's model inference time. Set False only if that cost genuinely matters somewhere.
+    verify_writes: bool = True
+    write_attempts: int = 3
 
 
 @dataclasses.dataclass

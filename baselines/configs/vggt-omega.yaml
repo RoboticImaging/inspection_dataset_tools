@@ -29,7 +29,6 @@ output:
   method: null                  # null = the baseline's registered name ("vggt-omega"); set it to
                                 # run two configurations of the same baseline side by side
   overwrite: false              # false = skip sequences that already have predictions
-  min_confidence: null           # per-frame depth masking isn't wired up in this baseline's run_sequence.py yet
-                                # (write_frame requires a conf array whenever this is set; only the
-                                # point cloud is confidence-filtered here) -- keep null until that's added
+  min_confidence: null          # absolute per-pixel depth cutoff -- VGGT-Omega doesn't use this, see below
+  cloud_confidence_percentile: 50.0  # percentile (0-100) of lowest-confidence points dropped from the cloud; null = keep everything
   cloud: true                    # fused .ply, unprojected from predicted depth + poses

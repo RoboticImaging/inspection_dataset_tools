@@ -15,10 +15,12 @@ prediction in the gt gauge; `inspection_eval.metrics` is the registry of scoring
 from .align import Sim3, umeyama
 from .case import EvalCase
 from .metrics import REGISTRY, Metric, register
-from .report import Table
-from .runner import (FrameGap, OomVariant, Results, Target, evaluate, frame_gaps, oom_variants,
-                    target_from_path, targets_from_paths, variants)
+from .report import Table, split_by
+from .runner import (FrameGap, Incomplete, OomVariant, Results, Target, evaluate, frame_gaps,
+                    incomplete_targets, oom_variants, target_from_path, targets_from_paths,
+                    variants)
 
-__all__ = ["EvalCase", "FrameGap", "Metric", "OomVariant", "REGISTRY", "Results", "Sim3", "Table",
-           "Target", "evaluate", "frame_gaps", "oom_variants", "register", "target_from_path",
-           "targets_from_paths", "umeyama", "variants"]
+__all__ = ["EvalCase", "FrameGap", "Incomplete", "Metric", "OomVariant", "REGISTRY", "Results",
+           "Sim3", "Table", "Target", "evaluate", "frame_gaps", "incomplete_targets",
+           "oom_variants", "register", "split_by", "target_from_path", "targets_from_paths",
+           "umeyama", "variants"]

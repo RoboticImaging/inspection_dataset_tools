@@ -5,6 +5,16 @@
 
 Each prediction folder is scored on every parameter combination it contains, one row per
 variant. See `inspection_eval/metrics/base.py` for how to add a metric.
+
+An asset/method combo is only scored once it's COMPLETE -- a prediction for every variant its
+asset has -- so a still-in-progress run isn't evaluated as though its partial output were the
+whole picture (see `inspection_eval.incomplete_targets`). --example is the one exception: it only
+ever asks about the single sequence it pins, so completeness there means just that one being
+present.
+
+By default every table mixes every asset/method combo's rows together, one file per metric;
+--save-hierarchical instead writes one subfolder per combo (see `write_hierarchical`), which is
+easier to browse when a run covers many assets or methods.
 """
 
 import argparse
@@ -14,7 +24,8 @@ from datetime import datetime
 from pathlib import Path
 
 from baselines.common.config import example_filters
-from inspection_eval import evaluate, frame_gaps, metrics, oom_variants, targets_from_paths
+from inspection_eval import (evaluate, frame_gaps, incomplete_targets, metrics, oom_variants,
+                            split_by, targets_from_paths)
 from inspection_eval.case import ALIGN_MODES
 from inspection_eval.report import FORMATS, read_tables
 from inspection_eval.runner import case_key
@@ -42,6 +53,17 @@ def parse_args(argv=None):
     existing.add_argument("--overwrite", action="store_true",
                           help="if the output folder already holds results, delete them and "
                                "evaluate everything again, without asking")
+    existing.add_argument("--save-hierarchical", action="store_true",
+                          help="write --out/<asset>/<method>/<metric>.<format> instead of one "
+                               "table per metric mixing every asset/method combo together, so "
+                               "it's easy to find a specific combo's files; --name still picks "
+                               "the root (--out/<NAME>/<asset>/<method>/...), and \"_example\" is "
+                               "appended to it when --example is set. There's no longer one "
+                               "run-labeled, timestamped folder, so instead each file gets the "
+                               "run's timestamp in its own name -- unless --no-timestamp, in "
+                               "which case a later run just replaces that combo's files. Not "
+                               "combinable with --resume/--overwrite: each hierarchical run "
+                               "stands on its own")
     p.add_argument("--metrics", default=None,
                    help=f"comma-separated subset of: {','.join(metrics.REGISTRY)}")
     p.add_argument("--allow-missing-frames", action="store_true",
@@ -131,6 +153,40 @@ def out_folder(args, targets) -> Path:
     return args.out / f"{run_label(targets, args.example)}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
 
 
+def hierarchical_root(args) -> Path:
+    """--save-hierarchical's output root: --out/<NAME> when named, else --out itself, with
+    "_example" appended when --example picked the variant instead of a real sweep -- same reason
+    as run_label's "-example", just at the root instead of a run-labeled folder, since hierarchical
+    mode has no such folder (see `write_hierarchical`)."""
+    root = args.out / args.name if args.name else args.out
+    return root.with_name(f"{root.name}_example") if args.example else root
+
+
+def write_hierarchical(results, root: Path, formats, timestamp: str | None) -> list[Path]:
+    """Write `results` under root/<asset>/<method>/<metric>.<format>, one subfolder per
+    asset/method combo instead of one table per metric mixing every combo's rows together -- so
+    it's obvious at a glance which files belong to which combo, instead of having to open a table
+    and filter its Asset/Method columns to find out.
+
+    There's no single run-labeled folder to carry a timestamp the way `out_folder` does, so
+    `timestamp` (when given -- omit it for --no-timestamp) goes in each file's own name instead:
+    root/<asset>/<method>/<metric>_<timestamp>.<format>. Without it, a later run on the same
+    asset/method combo simply replaces that combo's files -- there's no merging across runs the
+    way --resume does for the flat layout, which is why the two aren't combinable.
+    """
+    suffix = f"_{timestamp}" if timestamp else ""
+    written = []
+    for table in results.tables.values():
+        if not len(table):
+            continue
+        for (asset, method), sub in split_by(table, ("Asset", "Method")).items():
+            # same treatment as run_label: a colmap method's name has a "/" in it, which would
+            # otherwise nest a nonexistent extra directory level
+            out_dir = root / asset / method.replace("/", "-")
+            written += sub.write(out_dir, formats, suffix=suffix)
+    return written
+
+
 def start_from(out_dir: Path, args) -> dict:
     """The tables in `out_dir` to carry into this run, or {} to fill it from scratch.
 
@@ -179,6 +235,14 @@ def ask_about(out_dir: Path, cases: int) -> str:
             return "overwrite"
         if answer in ("q", "quit"):
             raise SystemExit("aborted, nothing was changed")
+
+
+def describe_incomplete(incomplete) -> str:
+    lines = [f"  {i.dataset.root.name} / {i.method}: {i.done}/{i.total} variant(s) have a cloud"
+            for i in incomplete]
+    return (f"{len(incomplete)} asset/method combo(s) aren't complete yet, so are skipped rather "
+           "than evaluated partially (pass --example to evaluate just the pinned single-sequence "
+           "case instead):\n" + "\n".join(lines))
 
 
 def describe_oom(oom) -> str:
@@ -253,20 +317,38 @@ def main(argv=None) -> int:
         "soil": args.soil, "reflectivity": args.reflectivity,
     }
 
+    if not args.example:
+        incomplete = incomplete_targets(targets)
+        if incomplete:
+            print(describe_incomplete(incomplete), file=sys.stderr)
+            skip = {(i.dataset.root, i.method) for i in incomplete}
+            targets = [t for t in targets if (t.dataset.root, t.method) not in skip]
+        if not targets:
+            raise SystemExit("nothing left to evaluate: every asset/method combo given is "
+                             "incomplete (pass --example to evaluate the pinned single-sequence "
+                             "case instead, or finish the run for a full one)")
+
     oom = oom_variants(targets, filters)
     if oom:
         print(describe_oom(oom), file=sys.stderr)
 
-    out_dir = out_folder(args, targets)
-    resume = start_from(out_dir, args)  # asked before anything long runs
+    formats = [f.strip() for f in args.format.split(",")]
+
+    if args.save_hierarchical:
+        out_root = hierarchical_root(args)
+        timestamp = None if args.no_timestamp else datetime.now().strftime("%Y%m%d-%H%M%S")
+        resume = {}  # each hierarchical run stands on its own -- see write_hierarchical
+        flush = None if args.no_stream else \
+            lambda partial: write_hierarchical(partial, out_root, formats, timestamp)
+    else:
+        out_dir = out_folder(args, targets)
+        resume = start_from(out_dir, args)  # asked before anything long runs
+        flush = None if args.no_stream else lambda partial: partial.write(out_dir, formats)
 
     if not args.allow_missing_frames:
         gaps = frame_gaps(targets, filters)
         if gaps:
             raise SystemExit(describe_gaps(gaps))
-
-    formats = [f.strip() for f in args.format.split(",")]
-    flush = None if args.no_stream else lambda partial: partial.write(out_dir, formats)
 
     results = evaluate(targets, names, args.align, parse_overrides(args.set), filters,
                        Progress(args.quiet), flush, resume)
@@ -282,7 +364,8 @@ def main(argv=None) -> int:
                   file=sys.stderr)
         return 1
 
-    written = results.write(out_dir, formats)
+    written = write_hierarchical(results, out_root, formats, timestamp) if args.save_hierarchical \
+        else results.write(out_dir, formats)
     print("\n" + "\n".join(f"wrote {p}" for p in written))
     return 0
 

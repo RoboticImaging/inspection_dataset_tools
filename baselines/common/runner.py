@@ -81,12 +81,14 @@ class SequenceOutput:
             depth = np.where(np.asarray(conf) >= self.spec.min_confidence, depth, np.nan) \
                       .astype(np.float32)
         stem = frame_stem(index)
-        write_depth(self.depth_dir / f"{stem}.exr", depth)
+        write_depth(self.depth_dir / f"{stem}.exr", depth,
+                   verify=self.spec.verify_writes, attempts=self.spec.write_attempts)
         write_cam(self.cam_dir / f"{stem}.json", c2w, K, width=intrinsics_width)
 
     def write_cloud(self, points: np.ndarray, colors: np.ndarray | None = None) -> None:
         """The one fused world-space cloud for this sequence."""
-        write_cloud(self.cloud_path, points, colors)
+        write_cloud(self.cloud_path, points, colors,
+                   verify=self.spec.verify_writes, attempts=self.spec.write_attempts)
 
     def mark_oom(self, message: str) -> None:
         """Leave a marker recording that this sequence hit a GPU OOM, so a later scan can tell

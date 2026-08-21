@@ -68,6 +68,18 @@ class OomVariant:
 
 
 @dataclass
+class Incomplete:
+    """One (asset, method) that hasn't got a prediction for every variant its asset has -- the
+    "COMPLETE" a run needs to reach before `evaluate` will score it by default (see
+    `incomplete_targets`)."""
+
+    dataset: AssetDataset
+    method: str
+    done: int   # variants with a prediction
+    total: int  # every variant the asset has
+
+
+@dataclass
 class Results:
     tables: dict  # metric name -> Table
     skips: list  # list[Skip]
@@ -187,6 +199,30 @@ def oom_variants(targets, filters: dict = None) -> list[OomVariant]:
                 continue
             if target.dataset.oom_path(variant, target.method) is not None:
                 out.append(OomVariant(target.dataset, target.method, variant))
+    return out
+
+
+def incomplete_targets(targets) -> list[Incomplete]:
+    """`targets` missing a prediction (depth/cam, a fused cloud, or a colmap reconstruction -- see
+    `AssetDataset.prediction_variants`) for some variant of their asset, with no GPU OOM marker to
+    explain why -- always judged against every variant the asset has, not whatever a filter narrows
+    a run to, since "complete" describes the prediction folder on disk, not one run's slice of it.
+    Deliberately the same notion of "predicted" `variants`/`evaluate` already score by -- not
+    `cloud_path`, since a fused cloud is an optional output (`output.cloud: false` is valid), not
+    proof a variant was run.
+
+    A target that's incomplete *because* of an OOM is not included here: `oom_variants`/`evaluate`
+    already report those (as an "OOM" row, not silence), rather than dropping them."""
+    out = []
+    for target in targets:
+        total = len(target.dataset.variants)
+        predicted = set(target.dataset.prediction_variants(target.method))
+        missing = [v for v in target.dataset.variants if v not in predicted]
+        if not missing:
+            continue
+        if any(target.dataset.oom_path(v, target.method) is not None for v in missing):
+            continue
+        out.append(Incomplete(target.dataset, target.method, total - len(missing), total))
     return out
 
 
