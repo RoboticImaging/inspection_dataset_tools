@@ -17,6 +17,14 @@ that overrides everything else for that asset/baseline: the summary just reads O
 variants it did finish before the OOM aren't a meaningful COMPLETE/PARTIAL/NOT STARTED picture of
 that asset for that baseline. --verbose lists which variant(s) triggered it.
 
+--eval-folder adds a second table alongside the prediction one: the same COMPLETE/PARTIAL/NOT
+STARTED/OOM picture, but for whether `eval.py` has actually scored each asset/baseline combo yet,
+read off an `eval.py --save-hierarchical` run rooted at the given folder (that folder is exactly
+what was passed as eval.py's --out/--name -- see eval.py's `hierarchical_root`). A variant counts
+as OOM there if any metric's row for it reads "OOM" (see inspection_eval.runner's OOM handling),
+and as done if any metric scored it at all -- metrics can legitimately skip different variants
+(no gt mesh means no cloud row, say), so requiring every metric to agree would under-count.
+
 Usage:
     python check_completion_status.py
     python check_completion_status.py --eccv-root /home/shared/eccv_2026_data
@@ -24,12 +32,17 @@ Usage:
     python check_completion_status.py --asset old_house                # only this asset
     python check_completion_status.py --verbose                        # list missing variants too
     python check_completion_status.py --example                        # only the example sequence
+    python check_completion_status.py --eval-folder eval_results/myrun # also check eval status
 
 Needs only this repo's own light dependencies (inspection_viz -- see requirements.txt), not any
-baseline's own heavy ones (torch, cv2, ...), so it runs fine directly on the host.
+baseline's own heavy ones (torch, cv2, ...), so it runs fine directly on the host. --eval-folder
+reads results csvs with the stdlib `csv` module rather than importing `inspection_eval` for the
+same reason: that package pulls in cv2/trimesh transitively.
 """
 
 import argparse
+import csv
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,12 +55,21 @@ from inspection_viz.dataset import AssetDataset, Variant
 
 DEFAULT_ECCV_ROOT = Path("/home/shared/eccv_2026_data")
 
+# The label columns an eval.py results csv starts with (see inspection_eval.runner.LABEL_COLUMNS
+# / EvalCase.label) -- reproduced here rather than imported, to keep --eval-folder's csv reading
+# free of inspection_eval's heavier dependencies (see module docstring).
+LABEL_COLUMNS = ("Asset", "Method", "Traj", "Illumination", "Soil", "Reflectivity")
+
 
 @dataclass
 class Status:
+    """COMPLETE/PARTIAL/NOT STARTED/OOM for one asset/baseline combo -- what `compute_status`
+    reports for predictions, and what `compute_eval_status` reports for --eval-folder's
+    evaluation-status table, from otherwise unrelated inputs (a cloud file vs. a results csv)."""
+
     total: int             # every variant the asset has
-    done: list[Variant]     # variants with a saved cloud from this method
-    oom: list[Variant]      # variants with no cloud, but a marker saying why: a GPU OOM
+    done: list[Variant]     # variants with output (a saved cloud, or a scored eval row)
+    oom: list[Variant]      # variants with no output, but a marker saying why: a GPU OOM
 
     @property
     def state(self) -> str:
@@ -90,6 +112,96 @@ def compute_status(ds: AssetDataset, method: str, variants: list[Variant]) -> St
     return Status(total=len(variants), done=done, oom=oom)
 
 
+_TIMESTAMP_SUFFIX = re.compile(r"_\d{8}-\d{6}$")
+
+
+def _latest_metric_csvs(method_dir: Path) -> list[Path]:
+    """The most recent csv for each metric under one asset/method's `eval.py --save-hierarchical`
+    folder. `write_hierarchical` names files `<metric>_<timestamp>.csv`, or plain `<metric>.csv`
+    under `--no-timestamp` -- e.g. `crane/da3/cloud_20260821-144854.csv` -- so a folder evaluated
+    more than once can hold several csvs per metric. Grouping by the name with any timestamp
+    suffix stripped and keeping the newest per group picks the right one either way: a plain
+    `<metric>.csv` is always current (a later `--no-timestamp` run overwrites it in place, rather
+    than adding another file), and otherwise the lexicographically-largest timestamp wins (they
+    sort correctly as text)."""
+    if not method_dir.is_dir():
+        return []
+    by_metric: dict[str, list[Path]] = {}
+    for path in method_dir.glob("*.csv"):
+        metric = _TIMESTAMP_SUFFIX.sub("", path.stem)
+        by_metric.setdefault(metric, []).append(path)
+
+    def latest(paths: list[Path]) -> Path:
+        bare = [p for p in paths if not _TIMESTAMP_SUFFIX.search(p.stem)]
+        return bare[0] if bare else max(paths, key=lambda p: p.stem)
+
+    return [latest(paths) for paths in by_metric.values()]
+
+
+def eval_variants(method_dir: Path) -> tuple[set[Variant], set[Variant]]:
+    """(done, oom) variants found across every metric csv under one asset/method's hierarchical
+    eval folder (see module docstring). A missing folder, or one with no csvs yet, yields two
+    empty sets -- `compute_eval_status` then reports that combo as NOT STARTED, same as a
+    baseline with no cloud file."""
+    done: set[Variant] = set()
+    oom: set[Variant] = set()
+    for path in _latest_metric_csvs(method_dir):
+        with path.open(newline="") as handle:
+            for row in csv.DictReader(handle):
+                variant = Variant(row.get("Traj") or None, row.get("Illumination") or None,
+                                  row.get("Soil") or None, row.get("Reflectivity") or None)
+                values = [v for k, v in row.items() if k not in LABEL_COLUMNS]
+                (oom if "OOM" in values else done).add(variant)
+    return done, oom
+
+
+def compute_eval_status(eval_folder: Path, asset: str, method: str,
+                        variants: list[Variant]) -> Status:
+    done_v, oom_v = eval_variants(eval_folder / asset / method)
+    done = [v for v in variants if v in done_v]
+    oom = [v for v in variants if v in oom_v]
+    return Status(total=len(variants), done=done, oom=oom)
+
+
+def print_status_table(assets: list[AssetDataset], methods: list[str], results: dict) -> None:
+    """One row per asset, one column per baseline; sized from what actually got computed, since
+    an OOM annotation can make a summary longer than a bare "COMPLETE (00/00)"."""
+    name_w = max(len(ds.root.name) for ds in assets)
+    col_w = max(len("COMPLETE (00/00)"), *(len(m) for m in methods),
+               *(len(s.summary) for s in results.values())) + 1
+
+    header = " " * name_w + "  " + "  ".join(m.ljust(col_w) for m in methods)
+    print(header)
+    print("-" * len(header))
+    for ds in assets:
+        row = [ds.root.name.ljust(name_w)]
+        for method in methods:
+            row.append(results[ds.root.name, method].summary.ljust(col_w))
+        print("  ".join(row))
+
+
+def print_missing(results: dict, variants_by_asset: dict, missing_label: str) -> None:
+    """--verbose detail for one results dict: for every non-COMPLETE combo, either the OOM
+    variant(s) that explain it or the variants still missing `missing_label` (e.g. "clouds",
+    "eval rows")."""
+    missing_any = False
+    for (asset, method), status in results.items():
+        if status.state == "COMPLETE":
+            continue
+        missing_any = True
+        if status.oom:
+            print(f"\n{asset} / {method}: OOM, hit on:")
+            for v in sorted(status.oom, key=str):
+                print(f"  - {v.as_dict()}")
+            continue
+        missing = sorted(set(variants_by_asset[asset]) - set(status.done), key=str)
+        print(f"\n{asset} / {method}: {status.summary}, missing {missing_label} for:")
+        for v in missing:
+            print(f"  - {v.as_dict()}")
+    if not missing_any:
+        print("\nEverything checked is COMPLETE.")
+
+
 def main(argv=None) -> None:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -105,6 +217,11 @@ def main(argv=None) -> None:
                    help="only check the one sequence pinned in "
                         "baselines/configs/data_example/<asset>.yaml (traj/illumination/soil), "
                         "instead of every variant found")
+    p.add_argument("--eval-folder", type=Path, default=None,
+                   help="also report evaluation status, read from an eval.py --save-hierarchical "
+                        "run rooted here (the exact folder passed as eval.py's --out/--name -- "
+                        "pass the already-suffixed folder yourself if that run also used "
+                        "--example); default: don't check evaluation status")
     args = p.parse_args(argv)
 
     methods = args.baselines or registry.available()
@@ -142,40 +259,22 @@ def main(argv=None) -> None:
     for ds in assets:
         for method in methods:
             results[ds.root.name, method] = compute_status(ds, method, variants_by_asset[ds.root.name])
+    print_status_table(assets, methods, results)
 
-    # One row per asset, one column per baseline; sized from what actually got computed above, since
-    # an OOM annotation can make a summary longer than a bare "COMPLETE (00/00)".
-    name_w = max(len(ds.root.name) for ds in assets)
-    col_w = max(len("COMPLETE (00/00)"), *(len(m) for m in methods),
-               *(len(s.summary) for s in results.values())) + 1
-
-    header = " " * name_w + "  " + "  ".join(m.ljust(col_w) for m in methods)
-    print(header)
-    print("-" * len(header))
-
-    for ds in assets:
-        row = [ds.root.name.ljust(name_w)]
-        for method in methods:
-            row.append(results[ds.root.name, method].summary.ljust(col_w))
-        print("  ".join(row))
+    eval_results = None
+    if args.eval_folder:
+        eval_results = {}
+        for ds in assets:
+            for method in methods:
+                eval_results[ds.root.name, method] = compute_eval_status(
+                    args.eval_folder, ds.root.name, method, variants_by_asset[ds.root.name])
+        print(f"\nEvaluation status ({args.eval_folder}):")
+        print_status_table(assets, methods, eval_results)
 
     if args.verbose:
-        missing_any = False
-        for (asset, method), status in results.items():
-            if status.state == "COMPLETE":
-                continue
-            missing_any = True
-            if status.oom:
-                print(f"\n{asset} / {method}: OOM, hit on:")
-                for v in sorted(status.oom, key=str):
-                    print(f"  - {v.as_dict()}")
-                continue
-            missing = sorted(set(variants_by_asset[asset]) - set(status.done), key=str)
-            print(f"\n{asset} / {method}: {status.summary}, missing clouds for:")
-            for v in missing:
-                print(f"  - {v.as_dict()}")
-        if not missing_any:
-            print("\nEverything checked is COMPLETE.")
+        print_missing(results, variants_by_asset, "clouds")
+        if eval_results is not None:
+            print_missing(eval_results, variants_by_asset, "eval rows")
 
 
 if __name__ == "__main__":

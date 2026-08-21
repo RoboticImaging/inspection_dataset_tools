@@ -10,8 +10,8 @@ import pytest
 import trimesh
 
 from conftest import WH, make_asset, make_colmap, make_predictions, write_cam, write_depth_exr
-from inspection_eval import (Sim3, evaluate, frame_gaps, target_from_path, targets_from_paths,
-                             umeyama)
+from inspection_eval import (Sim3, Target, evaluate, frame_gaps, target_from_path,
+                             targets_from_paths, umeyama)
 from inspection_eval.case import EvalCase, match_size
 from inspection_eval.metrics import REGISTRY, get
 from inspection_eval.metrics.cloud import CloudOptions
@@ -388,6 +388,95 @@ def test_table_renders_and_writes(tmp_path):
 
     written = table.write(tmp_path / "out", ("csv", "md", "tex"))
     assert {p.suffix for p in written} == {".csv", ".md", ".tex"}
+
+
+# --- GPU OOM: columns survive even when nothing was ever scored ---------------------------
+#
+# A metric's columns are normally learned from the keys a real row returns (see report.py); an
+# OOM case never calls `fn`, so a run where *every* case is OOM would otherwise never learn its
+# metrics' columns at all. `_columns` (declared alongside `fn` in each metric module) is a pure
+# function of options, so the runner can seed a fully-"OOM" row without ever touching data.
+
+
+def test_cloud_columns_match_what_the_metric_actually_returns(tmp_path):
+    ds = case_asset(tmp_path, cloud=True)
+    for kind in ("accuracy", "completeness"):
+        write_gt_mesh(ds.root, kind)
+    ds = AssetDataset(ds.root, ds.layout)  # re-scan, the meshes are new
+
+    o = CloudOptions(gt_points=20_000, thresholds=(0.1, 0.25))
+    case = EvalCase(ds, "da3", VARIANT, align_mode="none", cache_dir=tmp_path / "cache")
+    row = get("cloud").fn(case, o)
+    assert set(row.keys()) == set(get("cloud").columns(o))
+
+
+def test_depth_columns_match_what_the_metric_actually_returns(tmp_path):
+    ds = case_asset(tmp_path)
+    o = DepthOptions()
+    row = get("depth").fn(EvalCase(ds, "da3", VARIANT), o)
+    assert set(row.keys()) == set(get("depth").columns(o))
+
+
+def test_pose_columns_match_what_the_metric_actually_returns(tmp_path):
+    ds = case_asset(tmp_path, n_frames=5)
+    o = PoseOptions()
+    row = get("pose").fn(EvalCase(ds, "da3", VARIANT), o)
+    assert set(row.keys()) == set(get("pose").columns(o))
+
+
+def oom_target(tmp_path: Path, method="da3") -> Target:
+    """An asset whose only variant never produced a single prediction -- just the GPU-OOM marker
+    a baseline leaves behind (`baselines.common.writer.write_oom`) -- so `evaluate` has to report
+    it as OOM without ever calling a metric's `fn`, the corner this whole section guards."""
+    from baselines.common.writer import oom_path, write_oom
+
+    root = make_asset(tmp_path / "asset", trajs=("trajA",), illums=("sunny",), soils=("low",),
+                      mesh_kinds=("accuracy", "completeness"))
+    layout = Layout()
+    write_oom(oom_path(root, layout, method, BINDS), "CUDA out of memory")
+    return Target(AssetDataset(root, layout), method)
+
+
+def test_an_all_oom_run_still_gets_every_column_of_the_cloud_metric(tmp_path):
+    results = evaluate([oom_target(tmp_path)], ["cloud"])
+    table = results.tables["cloud"]
+    expected = get("cloud").columns(CloudOptions())
+
+    assert len(table) == 1
+    assert set(expected) <= set(table.columns)
+    assert all(table.rows[0][c] == "OOM" for c in expected)
+
+
+def test_an_all_oom_run_still_gets_every_column_of_the_depth_metric(tmp_path):
+    results = evaluate([oom_target(tmp_path)], ["depth"])
+    table = results.tables["depth"]
+    expected = get("depth").columns(DepthOptions())
+
+    assert len(table) == 1
+    assert set(expected) <= set(table.columns)
+    assert all(table.rows[0][c] == "OOM" for c in expected)
+
+
+def test_an_all_oom_run_still_gets_every_column_of_the_pose_metric(tmp_path):
+    results = evaluate([oom_target(tmp_path)], ["pose"])
+    table = results.tables["pose"]
+    expected = get("pose").columns(PoseOptions())
+
+    assert len(table) == 1
+    assert set(expected) <= set(table.columns)
+    assert all(table.rows[0][c] == "OOM" for c in expected)
+
+
+def test_an_all_oom_runs_written_csv_keeps_every_column_too(tmp_path):
+    from inspection_eval.report import read_tables
+
+    results = evaluate([oom_target(tmp_path)], ["depth"])
+    results.write(tmp_path / "out", ("csv",))
+
+    back = read_tables(tmp_path / "out")["depth"]
+    expected = get("depth").columns(DepthOptions())
+    assert set(expected) <= set(back.columns)
+    assert all(back.rows[0][c] == "OOM" for c in expected)
 
 
 # --- holes in the data --------------------------------------------------------------------

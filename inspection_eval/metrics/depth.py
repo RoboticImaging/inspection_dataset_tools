@@ -35,7 +35,18 @@ class DepthOptions:
     max_frames: int | None = None  # evaluate at most this many frames (evenly spread)
 
 
-@register("depth", needs=(CAP_DEPTH,), options=DepthOptions)
+def _columns(o: DepthOptions) -> list[str]:
+    """The keys `depth_metrics` returns for `o`, without touching a case -- see
+    `metrics.base`'s docstring for why this exists. Kept in lockstep with `depth_metrics` by
+    `test_depth_columns_match_what_the_metric_actually_returns`."""
+    cols = ["RMSE (m)", "MAE (m)", "Relative MAE", "Scale invariant MSE"]
+    cols += [f"Accuracy @{tau}" for tau in o.thresholds]
+    cols += [f"Completeness @{tau}" for tau in o.thresholds]
+    cols += ["Valid px ratio (est)", "Valid px ratio (gt)", "Depth scale", "Frames"]
+    return cols
+
+
+@register("depth", needs=(CAP_DEPTH,), options=DepthOptions, columns=_columns)
 def depth_metrics(case: EvalCase, o: DepthOptions) -> dict:
     frames = _select(case.depth_frames, o.max_frames)
     taus = np.asarray(o.thresholds, dtype=float)

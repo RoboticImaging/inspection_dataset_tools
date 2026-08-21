@@ -16,6 +16,16 @@ Adding a metric, in full:
         return {"My number": ...}
 
 ...then import the module in `metrics/__init__.py` so the decorator runs.
+
+`columns` is an optional extra: a `(options) -> list[str]` function naming, in order, the keys
+`fn` would return for those options -- without touching a `case` at all. Every column name
+`fn` produces already has to be a pure function of `o` (never of the data) for this to be
+correct, which is true of every metric so far (thresholds and the like only ever pick *which*
+keys appear, not what data goes into them). It exists for one narrow reason: when a run's
+target hit a GPU OOM, the runner never gets to call `fn` and so has no other way to learn what
+columns that case's row should have had (see `runner.evaluate`'s OOM handling). A metric that
+skips `columns` just keeps today's behaviour: an all-OOM run's table for it has only the label
+columns.
 """
 
 import dataclasses
@@ -29,6 +39,7 @@ class Metric:
     fn: Callable
     needs: tuple = ()
     options: type = None  # a dataclass of knobs, instantiated fresh per run
+    columns: Callable = None  # optional: (options) -> list[str], see module docstring
 
     def default_options(self):
         return self.options() if self.options is not None else None
@@ -37,11 +48,11 @@ class Metric:
 REGISTRY: dict[str, Metric] = {}
 
 
-def register(name: str, needs: tuple = (), options: type = None):
+def register(name: str, needs: tuple = (), options: type = None, columns: Callable = None):
     def wrap(fn):
         if name in REGISTRY:
             raise ValueError(f"metric {name!r} is already registered")
-        REGISTRY[name] = Metric(name, fn, tuple(needs), options)
+        REGISTRY[name] = Metric(name, fn, tuple(needs), options, columns)
         return fn
     return wrap
 

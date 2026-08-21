@@ -29,7 +29,19 @@ class PoseOptions:
     pairs: str = "consecutive"  # "consecutive" (as the original eval did) or "all"
 
 
-@register("pose", needs=(CAP_CAMERAS,), options=PoseOptions)
+def _columns(o: PoseOptions) -> list[str]:
+    """The keys `pose_metrics` returns for `o`, without touching a case -- see `metrics.base`'s
+    docstring for why this exists. Kept in lockstep with `pose_metrics` by
+    `test_pose_columns_match_what_the_metric_actually_returns`."""
+    cols = [f"RRA@{tau} %" for tau in o.thresholds]
+    cols += [f"RTA@{tau} %" for tau in o.thresholds]
+    cols.append(f"AUC@{o.auc_max}")
+    cols += ["ATE RMSE (m)", "ATE median (m)", "Abs rot err mean (deg)", "Align scale",
+            "Frames", "Cam pairs", "Undefined pairs"]
+    return cols
+
+
+@register("pose", needs=(CAP_CAMERAS,), options=PoseOptions, columns=_columns)
 def pose_metrics(case: EvalCase, o: PoseOptions) -> dict:
     frames = case.cam_frames
     gt = [case.gt_cams[i] for i in frames]

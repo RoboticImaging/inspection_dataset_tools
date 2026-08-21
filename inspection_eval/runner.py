@@ -294,7 +294,12 @@ def evaluate(targets, metric_names=None, align_mode: str = "sim3", overrides: di
         if is_oom:
             oom_keys.add(case_key(case.label))
             for metric in chosen:
-                tables[metric.name].add(dict(case.label))
+                # A metric that declares `columns` (see `metrics.base`) tells us its row shape
+                # up front, from options alone -- so the row is "OOM" in full immediately, even
+                # if every case in this run turns out to be OOM and `fn` is never called at all.
+                # One without it falls back on the backfill below, same as before.
+                cols = metric.columns(options[metric.name]) if metric.columns else ()
+                tables[metric.name].add({**case.label, **{c: "OOM" for c in cols}})
             say("oom", "  OOM: this method hit a GPU OOM on this asset, nothing was scored")
         else:
             for metric in chosen:
@@ -311,11 +316,12 @@ def evaluate(targets, metric_names=None, align_mode: str = "sim3", overrides: di
                     continue
                 tables[metric.name].add({**case.label, **row})
                 say("metric", f"  {metric.name}: ok")
-        # An OOM row was only ever given its label columns (its metric couldn't be run) -- fill the
-        # rest of it with "OOM" now that this case may have taught a table about columns it didn't
-        # have before, so a number and an OOM are never visually confusable in the same column.
-        # Redone after every case (not just once at the end) so a streamed or interrupted run's
-        # on-disk table is never left showing a blank cell where "OOM" belongs.
+        # A metric without declared `columns` gets its OOM row's non-label cells filled in here
+        # instead of up front, once some other case has taught the table about columns it didn't
+        # have before -- so a number and an OOM are never visually confusable in the same column.
+        # (A metric that does declare `columns` already got this in full above; this is a no-op
+        # for it.) Redone after every case (not just once at the end) so a streamed or
+        # interrupted run's on-disk table is never left showing a blank cell where "OOM" belongs.
         for table in tables.values():
             for row in table.rows:
                 if case_key(row) in oom_keys:
