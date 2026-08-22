@@ -986,3 +986,151 @@ def test_eval_cli_writes_into_a_named_timestamped_subfolder(tmp_path):
     assert len(subdirs) == 1
     assert subdirs[0].name.startswith("asset-da3-")
     assert (subdirs[0] / "depth.csv").is_file()
+
+
+# --- --resume with --save-hierarchical -------------------------------------------------------
+
+
+def test_overwrite_cant_be_combined_with_save_hierarchical(tmp_path):
+    import eval as eval_cli
+
+    with pytest.raises(SystemExit):
+        eval_cli.parse_args([str(tmp_path), "--overwrite", "--save-hierarchical"])
+
+
+def test_resume_can_be_combined_with_save_hierarchical():
+    import eval as eval_cli
+
+    args = eval_cli.parse_args(["preds", "--resume", "--save-hierarchical"])
+    assert args.resume and args.save_hierarchical
+
+
+def test_latest_metric_csvs_prefers_the_newest_timestamp(tmp_path):
+    import eval as eval_cli
+
+    method_dir = tmp_path / "asset" / "da3"
+    Table("pose").write(method_dir, ("csv",), suffix="_20260101-000000")
+    Table("pose").write(method_dir, ("csv",), suffix="_20260301-000000")
+    Table("pose").write(method_dir, ("csv",), suffix="_20260201-000000")
+
+    found = eval_cli._latest_metric_csvs(method_dir)
+    assert found["pose"].name == "pose_20260301-000000.csv"
+
+
+def test_latest_metric_csvs_prefers_a_bare_file_over_any_timestamp(tmp_path):
+    """A bare `<metric>.csv` is always current -- a --no-timestamp run overwrites it in place --
+    so it wins even against a lexicographically later timestamp."""
+    import eval as eval_cli
+
+    method_dir = tmp_path / "asset" / "da3"
+    Table("pose").write(method_dir, ("csv",), suffix="_20990101-000000")
+    Table("pose").write(method_dir, ("csv",))
+
+    found = eval_cli._latest_metric_csvs(method_dir)
+    assert found["pose"].name == "pose.csv"
+
+
+def test_latest_metric_csvs_is_empty_for_a_combo_never_evaluated(tmp_path):
+    import eval as eval_cli
+
+    assert eval_cli._latest_metric_csvs(tmp_path / "asset" / "nope") == {}
+
+
+def _write_pose_row(out_root: Path, asset: str, method: str, illumination: str, suffix: str):
+    table = Table("pose")
+    table.add({"Asset": asset, "Method": method, "Traj": "trajA", "Illumination": illumination,
+              "Soil": "low", "Reflectivity": "", "ATE RMSE (m)": 0.1})
+    table.write(out_root / asset / method, ("csv",), suffix=suffix)
+
+
+def test_start_from_hierarchical_merges_every_targets_combo(tmp_path):
+    import eval as eval_cli
+
+    ds = case_asset(tmp_path, n_frames=2)  # writes method "da3"
+    make_predictions(ds.root, ds.layout, "vggt", BINDS, n_frames=2)
+    targets = targets_from_paths([ds.root / "predictions"])
+
+    out_root = tmp_path / "out"
+    _write_pose_row(out_root, "asset", "da3", "sunny", "_20260101-000000")
+    _write_pose_row(out_root, "asset", "vggt", "sunny", "_20260201-000000")
+
+    resume, timestamp = eval_cli.start_from_hierarchical(out_root, targets)
+
+    assert timestamp == "20260201-000000"  # the latest found across every combo
+    assert {r["Method"] for r in resume["pose"].rows} == {"da3", "vggt"}
+
+
+def test_start_from_hierarchical_ignores_a_combo_outside_targets(tmp_path):
+    import eval as eval_cli
+
+    ds = case_asset(tmp_path, n_frames=2)  # writes method "da3" only
+    targets = targets_from_paths([ds.root / "predictions" / "da3"])
+
+    out_root = tmp_path / "out"
+    _write_pose_row(out_root, "asset", "da3", "sunny", "_20260101-000000")
+    _write_pose_row(out_root, "other_asset", "vggt", "sunny", "_20260901-000000")
+
+    resume, timestamp = eval_cli.start_from_hierarchical(out_root, targets)
+
+    assert timestamp == "20260101-000000"  # other_asset/vggt isn't part of this run's targets
+    assert {r["Asset"] for r in resume["pose"].rows} == {"asset"}
+
+
+def test_start_from_hierarchical_is_empty_on_a_fresh_run(tmp_path):
+    import eval as eval_cli
+
+    ds = case_asset(tmp_path, n_frames=2)
+    targets = targets_from_paths([ds.root / "predictions" / "da3"])
+
+    resume, timestamp = eval_cli.start_from_hierarchical(tmp_path / "out", targets)
+    assert resume == {} and timestamp is None
+
+
+def test_eval_cli_save_hierarchical_resume_continues_a_partial_combo(tmp_path):
+    """A combo cut off partway through picks up from its last completed case, and the resumed
+    run's files keep the same generation instead of starting a new timestamped copy."""
+    import csv
+
+    import eval as eval_cli
+
+    predictions = multi_variant_asset(tmp_path)
+    out = tmp_path / "out"
+    argv = [str(predictions), "--out", str(out), "--save-hierarchical",
+            "--metrics", "pose", "--format", "csv", "-q"]
+    combo = out / "asset" / "da3"
+
+    assert eval_cli.main(argv + ["--illumination", "sunny"]) == 0
+    [before] = combo.glob("pose_*.csv")
+    assert [r["Illumination"] for r in csv.DictReader(before.open())] == ["sunny"]
+
+    assert eval_cli.main(argv + ["--resume"]) == 0
+
+    [after] = combo.glob("pose_*.csv")
+    assert after == before  # same file: the resumed run reused its timestamp, not a new one
+    assert [r["Illumination"] for r in csv.DictReader(after.open())] == ["sunny", "night"]
+
+
+def test_eval_cli_save_hierarchical_resume_skips_a_fully_scored_combo(tmp_path):
+    """A combo that's already complete costs nothing on a resumed run: it's never rescored."""
+    import eval as eval_cli
+    from inspection_eval.metrics import REGISTRY, register
+
+    predictions = multi_variant_asset(tmp_path)
+    out = tmp_path / "out"
+    calls = []
+
+    @register("spy_hier")
+    def spy_hier(case, options):
+        calls.append(str(case.variant))
+        return {"Case": len(calls)}
+
+    try:
+        argv = [str(predictions), "--out", str(out), "--save-hierarchical",
+                "--metrics", "spy_hier", "--format", "csv", "-q"]
+        assert eval_cli.main(argv) == 0
+        assert len(calls) == 2  # both illuminations scored
+
+        assert eval_cli.main(argv + ["--resume"]) == 0
+        assert len(calls) == 2  # nothing rescored: the complete combo was skipped outright
+    finally:
+        REGISTRY.pop("spy_hier")

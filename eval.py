@@ -14,10 +14,13 @@ present.
 
 By default every table mixes every asset/method combo's rows together, one file per metric;
 --save-hierarchical instead writes one subfolder per combo (see `write_hierarchical`), which is
-easier to browse when a run covers many assets or methods.
+easier to browse when a run covers many assets or methods. --resume works with it too: a combo
+that's already fully scored is skipped outright, and one that stopped partway through picks up
+from its last completed case (see `start_from_hierarchical`).
 """
 
 import argparse
+import re
 import shutil
 import sys
 from datetime import datetime
@@ -27,7 +30,7 @@ from baselines.common.config import example_filters
 from inspection_eval import (evaluate, frame_gaps, incomplete_targets, metrics, oom_variants,
                             split_by, targets_from_paths)
 from inspection_eval.case import ALIGN_MODES
-from inspection_eval.report import FORMATS, read_tables
+from inspection_eval.report import FORMATS, Table, read_table, read_tables
 from inspection_eval.runner import case_key
 
 
@@ -49,21 +52,27 @@ def parse_args(argv=None):
     existing = p.add_mutually_exclusive_group()
     existing.add_argument("--resume", action="store_true",
                           help="if the output folder already holds results, keep them and only "
-                               "score the cases they are missing, without asking")
+                               "score the cases they are missing, without asking; combined with "
+                               "--save-hierarchical, this also skips straight past any "
+                               "asset/method combo whose hierarchical folder already has every "
+                               "case scored, instead of walking through it to confirm")
     existing.add_argument("--overwrite", action="store_true",
                           help="if the output folder already holds results, delete them and "
-                               "evaluate everything again, without asking")
-    existing.add_argument("--save-hierarchical", action="store_true",
-                          help="write --out/<asset>/<method>/<metric>.<format> instead of one "
-                               "table per metric mixing every asset/method combo together, so "
-                               "it's easy to find a specific combo's files; --name still picks "
-                               "the root (--out/<NAME>/<asset>/<method>/...), and \"_example\" is "
-                               "appended to it when --example is set. There's no longer one "
-                               "run-labeled, timestamped folder, so instead each file gets the "
-                               "run's timestamp in its own name -- unless --no-timestamp, in "
-                               "which case a later run just replaces that combo's files. Not "
-                               "combinable with --resume/--overwrite: each hierarchical run "
-                               "stands on its own")
+                               "evaluate everything again, without asking; not combinable with "
+                               "--save-hierarchical")
+    p.add_argument("--save-hierarchical", action="store_true",
+                   help="write --out/<asset>/<method>/<metric>.<format> instead of one "
+                        "table per metric mixing every asset/method combo together, so "
+                        "it's easy to find a specific combo's files; --name still picks "
+                        "the root (--out/<NAME>/<asset>/<method>/...), and \"_example\" is "
+                        "appended to it when --example is set. There's no longer one "
+                        "run-labeled, timestamped folder, so instead each file gets the "
+                        "run's timestamp in its own name -- unless --no-timestamp, in "
+                        "which case a later run just replaces that combo's files. Combine "
+                        "with --resume to continue an interrupted hierarchical run: cases "
+                        "already scored (in any combo's most recent timestamp) are kept, "
+                        "and the run's files keep that same timestamp instead of starting "
+                        "a new one. Not combinable with --overwrite")
     p.add_argument("--metrics", default=None,
                    help=f"comma-separated subset of: {','.join(metrics.REGISTRY)}")
     p.add_argument("--allow-missing-frames", action="store_true",
@@ -99,6 +108,8 @@ def parse_args(argv=None):
     if args.example and any(getattr(args, f) is not None
                             for f in ("traj", "illumination", "soil", "reflectivity")):
         p.error("--example can't be combined with --traj/--illumination/--soil/--reflectivity")
+    if args.overwrite and args.save_hierarchical:
+        p.error("--overwrite can't be combined with --save-hierarchical")
     return args
 
 
@@ -171,8 +182,10 @@ def write_hierarchical(results, root: Path, formats, timestamp: str | None) -> l
     There's no single run-labeled folder to carry a timestamp the way `out_folder` does, so
     `timestamp` (when given -- omit it for --no-timestamp) goes in each file's own name instead:
     root/<asset>/<method>/<metric>_<timestamp>.<format>. Without it, a later run on the same
-    asset/method combo simply replaces that combo's files -- there's no merging across runs the
-    way --resume does for the flat layout, which is why the two aren't combinable.
+    asset/method combo simply replaces that combo's files. A fresh hierarchical run otherwise
+    doesn't merge across runs the way --resume does for the flat layout -- --resume is the one
+    exception, and it works by reusing the timestamp it resumed from (see `start_from_hierarchical`)
+    rather than by merging here, so this function itself never needs to know the difference.
     """
     suffix = f"_{timestamp}" if timestamp else ""
     written = []
@@ -185,6 +198,62 @@ def write_hierarchical(results, root: Path, formats, timestamp: str | None) -> l
             out_dir = root / asset / method.replace("/", "-")
             written += sub.write(out_dir, formats, suffix=suffix)
     return written
+
+
+_TIMESTAMP_SUFFIX = re.compile(r"_\d{8}-\d{6}$")
+
+
+def _latest_metric_csvs(method_dir: Path) -> dict[str, Path]:
+    """The most recent csv for each metric under one asset/method's hierarchical output folder
+    (see `write_hierarchical`): grouped by name with any timestamp suffix stripped, keeping a
+    bare <metric>.csv (always current -- a --no-timestamp run overwrites it in place rather than
+    adding another file) or else the lexicographically-latest timestamped one (they sort
+    correctly as text). `check_completion_status.py` reads this same layout the same way, kept
+    separate here since it deliberately avoids importing `inspection_eval`."""
+    if not method_dir.is_dir():
+        return {}
+    by_metric: dict[str, list[Path]] = {}
+    for path in method_dir.glob("*.csv"):
+        by_metric.setdefault(_TIMESTAMP_SUFFIX.sub("", path.stem), []).append(path)
+
+    def latest(paths: list[Path]) -> Path:
+        bare = [p for p in paths if not _TIMESTAMP_SUFFIX.search(p.stem)]
+        return bare[0] if bare else max(paths, key=lambda p: p.stem)
+
+    return {metric: latest(paths) for metric, paths in by_metric.items()}
+
+
+def start_from_hierarchical(out_root: Path, targets) -> tuple[dict, str | None]:
+    """--resume's counterpart to `start_from`, for --save-hierarchical.
+
+    Every already-scored row found under out_root/<asset>/<method>/ for each of `targets` (the
+    combo's most recent timestamp only -- see `_latest_metric_csvs`), merged into one
+    {metric: Table}, the shape `evaluate`'s `resume` expects: `case_key` covers Asset/Method too,
+    so rows from every combo merge safely into the same table, and a combo whose folder is
+    already complete ends up with every one of its cases in `done` -- `evaluate` then skips
+    straight past it, exactly as if it had been left out of `targets` -- while a combo that's
+    only partway through resumes from whichever case it stopped at.
+
+    Paired with the latest timestamp found across every combo's files, so a combo already on that
+    generation has its files updated in place rather than growing a new timestamped copy each
+    time --resume is used. A combo left behind on an older generation (say, evaluated in an
+    earlier, separate sweep) instead gains a fresh file under the now-current timestamp, next to
+    its older one -- same "no merging between generations" rule a bare --save-hierarchical run
+    already has, just applied per combo instead of per run. {}, None when nothing on disk matches
+    any of `targets` (a fresh hierarchical run).
+    """
+    tables: dict[str, Table] = {}
+    timestamps = set()
+    for target in targets:
+        method_dir = out_root / target.dataset.root.name / target.method.replace("/", "-")
+        for metric, path in _latest_metric_csvs(method_dir).items():
+            match = _TIMESTAMP_SUFFIX.search(path.stem)
+            if match:
+                timestamps.add(match.group()[1:])
+            merged = tables.setdefault(metric, Table(metric))
+            for row in read_table(path).rows:
+                merged.add(row)
+    return tables, (max(timestamps) if timestamps else None)
 
 
 def start_from(out_dir: Path, args) -> dict:
@@ -336,8 +405,12 @@ def main(argv=None) -> int:
 
     if args.save_hierarchical:
         out_root = hierarchical_root(args)
-        timestamp = None if args.no_timestamp else datetime.now().strftime("%Y%m%d-%H%M%S")
-        resume = {}  # each hierarchical run stands on its own -- see write_hierarchical
+        if args.resume:
+            resume, prev_timestamp = start_from_hierarchical(out_root, targets)
+        else:
+            resume, prev_timestamp = {}, None  # a fresh hierarchical run stands on its own
+        timestamp = None if args.no_timestamp else prev_timestamp or \
+            datetime.now().strftime("%Y%m%d-%H%M%S")
         flush = None if args.no_stream else \
             lambda partial: write_hierarchical(partial, out_root, formats, timestamp)
     else:
