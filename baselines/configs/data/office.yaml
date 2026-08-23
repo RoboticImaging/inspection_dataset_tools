@@ -7,7 +7,7 @@
 # on that axis, discovered from the asset itself. So dropping the three axis lines below runs
 # every sequence of the asset; `illumination: [sunny, overcast]` runs a subset.
 
-asset: /home/shared/eccv_2026_data/office_dynamic/   # the asset folder, e.g. .../glass_house
+asset: /home/shared/eccv_2026_data/office2/   # the asset folder, e.g. .../glass_house
 
 trajectory: null
 illumination: null
