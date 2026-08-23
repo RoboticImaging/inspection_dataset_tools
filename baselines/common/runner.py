@@ -57,9 +57,18 @@ class SequenceOutput:
         return variant_label(self.variant)
 
     def exists(self) -> bool:
-        """Has a previous run already written this sequence? Any depth file counts: a run that
-        died halfway still leaves a dir behind, and re-running it is the point of `overwrite`."""
-        return self.depth_dir.is_dir() and any(self.depth_dir.iterdir())
+        """Has a previous run already written this sequence? Requires at least one depth file (no
+        dir at all means the run never started) and, when this baseline writes a fused cloud, that
+        cloud actually being on disk too -- write_cloud is the last thing `Baseline.run` does, so
+        its absence means the process died partway through (e.g. an uncaught kill mid-sequence,
+        rather than the GPU OOM `run_baseline` itself catches and marks). Without this, a variant
+        that died after writing some depth frames but before the cloud step would be silently
+        treated as done forever, disagreeing with check_completion_status.py, which uses the same
+        cloud-presence signal to decide COMPLETE/PARTIAL. Re-running it is the point of
+        `overwrite`."""
+        if not (self.depth_dir.is_dir() and any(self.depth_dir.iterdir())):
+            return False
+        return self.cloud_path.is_file() if self.spec.cloud else True
 
     def scratch_dir(self, name: str) -> Path:
         """A working dir beside the fused cloud, for a model's own exporter to write into."""
