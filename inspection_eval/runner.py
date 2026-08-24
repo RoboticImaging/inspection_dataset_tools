@@ -232,8 +232,12 @@ LABEL_COLUMNS = ("Asset", "Method", "Traj", "Illumination", "Soil", "Reflectivit
 def case_key(row: dict) -> tuple:
     """What identifies a case across runs: its label columns, as text. Works on an `EvalCase`'s
     `label` and on a row read back from a `.csv`, so a resumed run can tell what it already has —
-    a column the case does not use is absent in one and blank in the other, and both read ""."""
-    return tuple(str(row.get(column, "") or "") for column in LABEL_COLUMNS)
+    a column the case does not use is absent in one and blank in the other, and both already
+    read "" via `.get`'s own default. Deliberately *not* `row.get(column, "") or ""`: a resumed
+    numeric label -- Reflectivity 0.0, say -- comes back from `report._typed` as the *falsy*
+    float 0.0, and `or ""` would collapse that into the same key as a case that never had the
+    column at all, breaking --resume's dedup for reflectivity 0.0 specifically."""
+    return tuple(str(row.get(column, "")) for column in LABEL_COLUMNS)
 
 
 def evaluate(targets, metric_names=None, align_mode: str = "sim3", overrides: dict = None,

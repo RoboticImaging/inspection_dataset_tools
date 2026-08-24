@@ -390,6 +390,43 @@ def test_table_renders_and_writes(tmp_path):
     assert {p.suffix for p in written} == {".csv", ".md", ".tex"}
 
 
+# --- labels always carry every column, and resuming a Reflectivity of 0.0 -----------------
+
+
+def test_label_always_has_every_label_column(tmp_path):
+    """Every column is present -- blank for whichever axis this variant doesn't use -- instead
+    of Illumination/Soil/Reflectivity only showing up once some case happens to need them, so a
+    metric's table has the same column order regardless of which assets/methods it covers."""
+    ds = case_asset(tmp_path)
+    soil_case = EvalCase(ds, "da3", VARIANT)
+    assert soil_case.label == {"Asset": "asset", "Method": "da3", "Traj": "trajA",
+                               "Illumination": "sunny", "Soil": "low", "Reflectivity": ""}
+
+    refl_case = EvalCase(ds, "da3", Variant("trajA", "sunny", None, "0.0"))
+    assert refl_case.label == {"Asset": "asset", "Method": "da3", "Traj": "trajA",
+                               "Illumination": "sunny", "Soil": "", "Reflectivity": "0.0"}
+
+
+def test_case_key_recognizes_a_resumed_reflectivity_of_zero(tmp_path):
+    """The bug this guards: `report._typed` turns a saved Reflectivity of "0.0" back into the
+    *falsy* float 0.0 on --resume, and `case_key` used to do `row.get(col, "") or ""`, which
+    collapsed that into the same key as a case with no reflectivity at all -- so --resume never
+    recognized an already-scored reflectivity=0.0 case and rescored (duplicated) it."""
+    from inspection_eval.runner import case_key
+
+    ds = case_asset(tmp_path)
+    live = EvalCase(ds, "da3", Variant("trajA", "sunny", None, "0.0")).label
+    resumed = {**live, "Reflectivity": 0.0}  # as read_table/_typed would produce it
+    assert case_key(live) == case_key(resumed)
+
+
+def test_evaluated_table_columns_lead_with_every_label_even_for_a_soil_only_asset(tmp_path):
+    ds = case_asset(tmp_path)  # soil-only fixture, never touches reflectivity
+    results = evaluate([target_from_path(ds.root / "predictions" / "da3")], ["pose"])
+    assert results.tables["pose"].columns[:6] == \
+        ["Asset", "Method", "Traj", "Illumination", "Soil", "Reflectivity"]
+
+
 # --- GPU OOM: columns survive even when nothing was ever scored ---------------------------
 #
 # A metric's columns are normally learned from the keys a real row returns (see report.py); an
