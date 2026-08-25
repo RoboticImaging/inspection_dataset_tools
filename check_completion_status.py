@@ -17,6 +17,15 @@ that overrides everything else for that asset/baseline: the summary just reads O
 variants it did finish before the OOM aren't a meaningful COMPLETE/PARTIAL/NOT STARTED picture of
 that asset for that baseline. --verbose lists which variant(s) triggered it.
 
+colmap is checked alongside every registered baseline, as its own "colmap/no_gt" column --
+predictions found under <asset>/colmap/no_gt (every asset currently on disk only ever has a
+"no_gt" mode; see `AssetDataset`'s COLMAP_PREFIX). It isn't in baselines/registry.py (it's run via
+its own colmap_*.sh scripts, not baselines.common.runner), but `AssetDataset` already treats a
+colmap run as just another "method" -- a fused cloud at colmap/no_gt/.../dense/fused.ply reads the
+same as predictions/<method>/.../clouds/....ply -- so the exact same COMPLETE/PARTIAL/NOT
+STARTED/OOM accounting applies to it unchanged. --baseline colmap/no_gt selects only it, same as
+any registered name.
+
 --eval-folder adds a second table alongside the prediction one: the same COMPLETE/PARTIAL/NOT
 STARTED/OOM picture, but for whether `eval.py` has actually scored each asset/baseline combo yet,
 read off an `eval.py --save-hierarchical` run rooted at the given folder (that folder is exactly
@@ -30,6 +39,7 @@ Usage:
     python check_completion_status.py --eccv-root /home/shared/eccv_2026_data
     python check_completion_status.py --baseline vggt --baseline pi3   # only these baselines
     python check_completion_status.py --asset old_house                # only this asset
+    python check_completion_status.py --exclude-asset old_house        # every asset but this
     python check_completion_status.py --verbose                        # list missing variants too
     python check_completion_status.py --example                        # only the example sequence
     python check_completion_status.py --eval-folder eval_results/myrun # also check eval status
@@ -54,6 +64,14 @@ from baselines.common.config import example_filters
 from inspection_viz.dataset import AssetDataset, Variant
 
 DEFAULT_ECCV_ROOT = Path("/home/shared/eccv_2026_data")
+
+# colmap isn't a registered baseline (baselines/registry.py) -- it's run separately, via
+# colmap_*.sh, not baselines.common.runner -- but AssetDataset already folds it into the same
+# "method" concept as every other prediction source (see inspection_viz.dataset.AssetDataset,
+# COLMAP_PREFIX), so it's checked here the exact same way, just not drawn from that registry.
+# "no_gt" is the only mode any asset currently has on disk (checked across every asset's
+# colmap/ dir); a future second mode would need its own entry here.
+COLMAP_METHOD = "colmap/no_gt"
 
 # The label columns an eval.py results csv starts with (see inspection_eval.runner.LABEL_COLUMNS
 # / EvalCase.label) -- reproduced here rather than imported, to keep --eval-folder's csv reading
@@ -86,14 +104,19 @@ class Status:
         return f"{self.state} ({len(self.done)}/{self.total})"
 
 
-def discover_assets(eccv_root: Path, only: set[str] | None) -> list[AssetDataset]:
+def discover_assets(eccv_root: Path, only: set[str] | None,
+                    exclude: set[str] | None = None) -> list[AssetDataset]:
     """Every subdirectory of `eccv_root` that's actually an inspection asset (has at least one
     sequence). eccv_2026_data also holds loose files at the same level (colmap_*.sh,
     upload_script.py, ...); those, and any directory with no matching sequences, are skipped.
+    `exclude` drops assets by name after `only` is applied, for omitting a few noisy assets
+    from an otherwise-default (or --asset-filtered) run without having to list every other one.
     """
     assets = []
     for path in sorted(eccv_root.iterdir()):
         if not path.is_dir() or (only and path.name not in only):
+            continue
+        if exclude and path.name in exclude:
             continue
         try:
             ds = AssetDataset(path)
@@ -157,7 +180,11 @@ def eval_variants(method_dir: Path) -> tuple[set[Variant], set[Variant]]:
 
 def compute_eval_status(eval_folder: Path, asset: str, method: str,
                         variants: list[Variant]) -> Status:
-    done_v, oom_v = eval_variants(eval_folder / asset / method)
+    # a colmap method's name has a "/" in it (e.g. "colmap/no_gt"); flattened here the same way
+    # eval.py's write_hierarchical does, so this lands on the one real folder
+    # (<eval_folder>/<asset>/colmap-no_gt) instead of nesting a nonexistent extra directory level.
+    folder = method.replace("/", "-")
+    done_v, oom_v = eval_variants(eval_folder / asset / folder)
     done = [v for v in variants if v in done_v]
     oom = [v for v in variants if v in oom_v]
     return Status(total=len(variants), done=done, oom=oom)
@@ -208,9 +235,13 @@ def main(argv=None) -> None:
     p.add_argument("--eccv-root", type=Path, default=DEFAULT_ECCV_ROOT,
                    help=f"asset root to scan (default: {DEFAULT_ECCV_ROOT})")
     p.add_argument("--baseline", action="append", dest="baselines", metavar="NAME",
-                   help="only check this baseline (repeatable); default: every registered one")
+                   help=f"only check this baseline (repeatable), or {COLMAP_METHOD!r} for colmap; "
+                        f"default: every registered one plus {COLMAP_METHOD!r}")
     p.add_argument("--asset", action="append", dest="assets", metavar="NAME",
                    help="only check this asset by folder name (repeatable); default: every one found")
+    p.add_argument("--exclude-asset", action="append", dest="exclude_assets", metavar="NAME",
+                   help="omit this asset by folder name from the printout (repeatable); "
+                        "applied after --asset")
     p.add_argument("--verbose", action="store_true",
                    help="list the specific variants missing a cloud for any non-COMPLETE result")
     p.add_argument("--example", action="store_true",
@@ -224,15 +255,16 @@ def main(argv=None) -> None:
                         "--example); default: don't check evaluation status")
     args = p.parse_args(argv)
 
-    methods = args.baselines or registry.available()
-    unknown = set(methods) - set(registry.available())
+    methods = args.baselines or [*registry.available(), COLMAP_METHOD]
+    unknown = set(methods) - set(registry.available()) - {COLMAP_METHOD}
     if unknown:
         raise SystemExit(f"unknown baseline(s) {sorted(unknown)}; registered: "
-                         f"{', '.join(registry.available())}")
+                         f"{', '.join(registry.available())}, plus {COLMAP_METHOD!r}")
 
     only = set(args.assets) if args.assets else None
+    exclude = set(args.exclude_assets) if args.exclude_assets else None
     print(f"scanning {args.eccv_root} ...")
-    assets = discover_assets(args.eccv_root, only)
+    assets = discover_assets(args.eccv_root, only, exclude)
     if not assets:
         raise SystemExit(f"no assets with sequences found under {args.eccv_root}"
                          + (f" matching {sorted(only)}" if only else ""))
