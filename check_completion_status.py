@@ -52,6 +52,7 @@ same reason: that package pulls in cv2/trimesh transitively.
 
 import argparse
 import csv
+import os
 import re
 import sys
 from dataclasses import dataclass
@@ -64,6 +65,18 @@ from baselines.common.config import example_filters
 from inspection_viz.dataset import AssetDataset, Variant
 
 DEFAULT_ECCV_ROOT = Path("/home/shared/eccv_2026_data")
+
+# COMPLETE/PARTIAL/NOT STARTED/OOM colors for the printed tables/--verbose detail (see Status.color
+# below). Off entirely when stdout isn't a terminal (e.g. redirected to a log file, as the mpsfm
+# crash-capture workflow does) or NO_COLOR is set (https://no-color.org), so piped/saved output
+# stays plain text rather than full of escape codes.
+_USE_COLOR = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+_GREEN, _YELLOW, _RED, _BLUE, _RESET = (
+    "\033[32m", "\033[33m", "\033[31m", "\033[34m", "\033[0m") if _USE_COLOR else ("",) * 5
+
+
+def _colorize(text: str, color: str) -> str:
+    return f"{color}{text}{_RESET}" if color else text
 
 # colmap isn't a registered baseline (baselines/registry.py) -- it's run separately, via
 # colmap_*.sh, not baselines.common.runner -- but AssetDataset already folds it into the same
@@ -102,6 +115,14 @@ class Status:
         if self.oom:
             return "OOM"
         return f"{self.state} ({len(self.done)}/{self.total})"
+
+    @property
+    def color(self) -> str:
+        """The ANSI color `summary`/`state` should print in: blue for OOM (checked first, same as
+        `summary`), else green/yellow/red for COMPLETE/PARTIAL/NOT STARTED."""
+        if self.oom:
+            return _BLUE
+        return {"COMPLETE": _GREEN, "PARTIAL": _YELLOW, "NOT STARTED": _RED}[self.state]
 
 
 def discover_assets(eccv_root: Path, only: set[str] | None,
@@ -203,7 +224,11 @@ def print_status_table(assets: list[AssetDataset], methods: list[str], results: 
     for ds in assets:
         row = [ds.root.name.ljust(name_w)]
         for method in methods:
-            row.append(results[ds.root.name, method].summary.ljust(col_w))
+            status = results[ds.root.name, method]
+            # pad the plain text to col_w *before* adding color codes -- ljust'ing the colorized
+            # string would count the (invisible) escape sequence characters as part of the width
+            # and under-pad every cell.
+            row.append(_colorize(status.summary.ljust(col_w), status.color))
         print("  ".join(row))
 
 
@@ -217,12 +242,13 @@ def print_missing(results: dict, variants_by_asset: dict, missing_label: str) ->
             continue
         missing_any = True
         if status.oom:
-            print(f"\n{asset} / {method}: OOM, hit on:")
+            print(f"\n{asset} / {method}: {_colorize('OOM', status.color)}, hit on:")
             for v in sorted(status.oom, key=str):
                 print(f"  - {v.as_dict()}")
             continue
         missing = sorted(set(variants_by_asset[asset]) - set(status.done), key=str)
-        print(f"\n{asset} / {method}: {status.summary}, missing {missing_label} for:")
+        print(f"\n{asset} / {method}: {_colorize(status.summary, status.color)}, "
+             f"missing {missing_label} for:")
         for v in missing:
             print(f"  - {v.as_dict()}")
     if not missing_any:
