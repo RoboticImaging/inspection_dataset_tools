@@ -12,6 +12,8 @@ to have failed partway through an asset shouldn't have the variants it did finis
 picture. See `oom_variants`.
 """
 
+import contextlib
+import multiprocessing
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -240,8 +242,70 @@ def case_key(row: dict) -> tuple:
     return tuple(str(row.get(column, "")) for column in LABEL_COLUMNS)
 
 
+@dataclass
+class _CaseResult:
+    """One case's outcome, safe to send back across a process boundary: no `EvalCase`, `Table`,
+    or exception object, only plain data -- what `_score_case` returns and `evaluate`'s loop
+    would otherwise have computed inline. `rows` holds a metric's returned dict for every metric
+    that succeeded; `skips` holds (metric name, "skip"|"error", reason) for the rest, the same
+    two outcomes the loop already distinguishes via different `say(...)` events."""
+
+    rows: dict    # metric name -> row
+    skips: list   # list[(metric name, "skip" | "error", reason)]
+
+
+def _score_case(target: Target, variant: Variant, align_mode: str, metric_names: list,
+                options: dict) -> _CaseResult:
+    """Score one case against every metric in `metric_names`, building its own `EvalCase` from
+    `(target, variant)`. This is the only thing allowed to touch an `EvalCase`'s cached
+    properties, so it must never be handed one that's already touched them -- a colmap case's
+    frames wrap `pycolmap.Image` objects once loaded, which are not picklable, so an EvalCase
+    that crossed a process boundary already populated would blow up on the way back.
+
+    Called directly, in-process, for the serial (`workers <= 1`) path, and via `_pool_worker`
+    inside each worker process for the parallel path -- one function, so the two paths can never
+    disagree about what a case's outcome is."""
+    case = EvalCase(target.dataset, target.method, variant, align_mode)
+    rows, skips = {}, []
+    for name in metric_names:
+        metric = metrics_pkg.get(name)
+        missing = case.missing(metric.needs)
+        if missing:
+            skips.append((name, "skip", f"no {', '.join(missing)}"))
+            continue
+        try:
+            rows[name] = metric.fn(case, options[name])
+        except Exception as exc:  # one bad variant must not sink the whole run
+            skips.append((name, "error", f"{type(exc).__name__}: {exc}"))
+    return _CaseResult(rows, skips)
+
+
+_pool_context: dict = {}  # populated by _pool_init, in each worker process's own memory only
+
+
+def _pool_init(metric_names: list, options: dict, align_mode: str) -> None:
+    """`Pool(initializer=...)`: runs once per worker process rather than once per task, so the
+    run-wide constants (metric names/options/align mode) are pickled once at pool startup instead
+    of with every case. Also caps OpenCV's own thread pool -- `geometry.nearest_distances`
+    already asks scipy for every thread it can get (`workers=-1`); N worker *processes* each
+    doing that too would oversubscribe the CPU further, and `cv2.setNumThreads` (unlike an env
+    var, which BLAS/OpenMP only read at library-load time) still takes effect after a fork."""
+    import cv2
+    cv2.setNumThreads(1)
+    _pool_context.update(metric_names=metric_names, options=options, align_mode=align_mode)
+
+
+def _pool_worker(task: tuple) -> _CaseResult:
+    """`Pool.imap`'s per-task entry point: unpacks the one thing that varies per case,
+    `(target, variant)`, and delegates to `_score_case` with the constants `_pool_init` stashed."""
+    target, variant = task
+    ctx = _pool_context
+    return _score_case(target, variant, ctx["align_mode"], ctx["metric_names"], ctx["options"])
+
+
 def evaluate(targets, metric_names=None, align_mode: str = "sim3", overrides: dict = None,
-             filters: dict = None, on_event=None, after_case=None, resume: dict = None) -> Results:
+             filters: dict = None, on_event=None, after_case=None, resume: dict = None,
+             workers: int = 1) -> Results:
     """Score every variant of every target with every metric.
 
     `overrides` maps a metric name to `{option: "value as text"}` (the CLI's `--set`).
@@ -259,6 +323,12 @@ def evaluate(targets, metric_names=None, align_mode: str = "sim3", overrides: di
     would otherwise cover gets a row in every metric's table with "OOM" in place of every value
     that metric would otherwise have reported, since a baseline that OOM'd partway through an
     asset shouldn't be read as if the variants it did finish are the whole picture.
+
+    `workers` scores that many cases at once, each in its own process (default 1: sequential,
+    in-process, unchanged from before this parameter existed) -- an already-resumed or OOM case
+    is never dispatched to a worker (see `to_score` below), so a run that is entirely resumed or
+    entirely OOM never touches a pool at all. Opt-in only: this is never auto-detected from
+    `os.cpu_count()`, since a run commonly shares a box with other people's jobs.
     """
     names = list(metric_names or metrics_pkg.REGISTRY)
     chosen = [metrics_pkg.get(n) for n in names]
@@ -287,53 +357,70 @@ def evaluate(targets, metric_names=None, align_mode: str = "sim3", overrides: di
                 + (f", {len(done)} already scored" if done else ""),
         total=total, metrics=names, done=len(done))
 
-    for index, (target, variant) in enumerate(plan, 1):
-        case = EvalCase(target.dataset, target.method, variant, align_mode)
-        is_oom = (target.dataset.root, target.method) in oom_targets
-        say("case", f"{target.dataset.root.name} / {target.method} / {variant}"
-                    + (" [OOM]" if is_oom else ""), index=index, total=total)
-        if case_key(case.label) in done:
-            say("resumed", "  already scored, kept from the previous run")
-            continue
-        if is_oom:
-            oom_keys.add(case_key(case.label))
-            for metric in chosen:
-                # A metric that declares `columns` (see `metrics.base`) tells us its row shape
-                # up front, from options alone -- so the row is "OOM" in full immediately, even
-                # if every case in this run turns out to be OOM and `fn` is never called at all.
-                # One without it falls back on the backfill below, same as before.
-                cols = metric.columns(options[metric.name]) if metric.columns else ()
-                tables[metric.name].add({**case.label, **{c: "OOM" for c in cols}})
-            say("oom", "  OOM: this method hit a GPU OOM on this asset, nothing was scored")
-        else:
-            for metric in chosen:
-                missing = case.missing(metric.needs)
-                if missing:
-                    skips.append(Skip(case, metric.name, f"no {', '.join(missing)}"))
-                    say("skip", f"  {metric.name}: skipped (no {', '.join(missing)})")
-                    continue
-                try:
-                    row = metric.fn(case, options[metric.name])
-                except Exception as exc:  # one bad variant must not sink the whole run
-                    skips.append(Skip(case, metric.name, f"{type(exc).__name__}: {exc}"))
-                    say("error", f"  {metric.name}: failed ({type(exc).__name__}: {exc})")
-                    continue
-                tables[metric.name].add({**case.label, **row})
-                say("metric", f"  {metric.name}: ok")
-        # A metric without declared `columns` gets its OOM row's non-label cells filled in here
-        # instead of up front, once some other case has taught the table about columns it didn't
-        # have before -- so a number and an OOM are never visually confusable in the same column.
-        # (A metric that does declare `columns` already got this in full above; this is a no-op
-        # for it.) Redone after every case (not just once at the end) so a streamed or
-        # interrupted run's on-disk table is never left showing a blank cell where "OOM" belongs.
-        for table in tables.values():
-            for row in table.rows:
-                if case_key(row) in oom_keys:
-                    for column in table.columns:
-                        if column not in LABEL_COLUMNS:
-                            row[column] = "OOM"
-        if after_case:
-            after_case(results)
-    say("done", f"{total} case(s) scored", index=total, total=total)
+    # Only a case that is neither already-done (resumed) nor OOM ever needs a metric actually run
+    # on it -- those two are handled inline below with zero dispatch, exactly as before `workers`
+    # existed. Precomputing `to_score` up front lets the serial and parallel paths share one
+    # definition of what gets scored, and lets `imap` line results up with `plan`'s order.
+    to_score = [(t, v) for t, v in plan
+               if (t.dataset.root, t.method) not in oom_targets
+               and case_key(EvalCase(t.dataset, t.method, v, align_mode).label) not in done]
+
+    if workers > 1 and to_score:
+        # fork explicitly, not whatever the platform default is: workers must inherit
+        # metrics_pkg.REGISTRY exactly as it stands right now, including anything registered at
+        # runtime -- spawn would re-import the metrics package fresh and could lose that.
+        pool = multiprocessing.get_context("fork").Pool(
+            workers, initializer=_pool_init, initargs=(names, options, align_mode))
+        results_iter = pool.imap(_pool_worker, to_score)  # ordered: matches plan's own order
+    else:
+        pool = contextlib.nullcontext()
+        results_iter = (_score_case(t, v, align_mode, names, options) for t, v in to_score)
+
+    with pool:
+        for index, (target, variant) in enumerate(plan, 1):
+            case = EvalCase(target.dataset, target.method, variant, align_mode)
+            is_oom = (target.dataset.root, target.method) in oom_targets
+            say("case", f"{target.dataset.root.name} / {target.method} / {variant}"
+                        + (" [OOM]" if is_oom else ""), index=index, total=total)
+            if case_key(case.label) in done:
+                say("resumed", "  already scored, kept from the previous run")
+                continue
+            if is_oom:
+                oom_keys.add(case_key(case.label))
+                for metric in chosen:
+                    # A metric that declares `columns` (see `metrics.base`) tells us its row shape
+                    # up front, from options alone -- so the row is "OOM" in full immediately, even
+                    # if every case in this run turns out to be OOM and `fn` is never called at all.
+                    # One without it falls back on the backfill below, same as before.
+                    cols = metric.columns(options[metric.name]) if metric.columns else ()
+                    tables[metric.name].add({**case.label, **{c: "OOM" for c in cols}})
+                say("oom", "  OOM: this method hit a GPU OOM on this asset, nothing was scored")
+            else:
+                result = next(results_iter)
+                skip_by_name = {name: (kind, reason) for name, kind, reason in result.skips}
+                for metric in chosen:
+                    if metric.name in result.rows:
+                        tables[metric.name].add({**case.label, **result.rows[metric.name]})
+                        say("metric", f"  {metric.name}: ok")
+                    else:
+                        kind, reason = skip_by_name[metric.name]
+                        skips.append(Skip(case, metric.name, reason))
+                        verb = "skipped" if kind == "skip" else "failed"
+                        say(kind, f"  {metric.name}: {verb} ({reason})")
+            # A metric without declared `columns` gets its OOM row's non-label cells filled in here
+            # instead of up front, once some other case has taught the table about columns it didn't
+            # have before -- so a number and an OOM are never visually confusable in the same column.
+            # (A metric that does declare `columns` already got this in full above; this is a no-op
+            # for it.) Redone after every case (not just once at the end) so a streamed or
+            # interrupted run's on-disk table is never left showing a blank cell where "OOM" belongs.
+            for table in tables.values():
+                for row in table.rows:
+                    if case_key(row) in oom_keys:
+                        for column in table.columns:
+                            if column not in LABEL_COLUMNS:
+                                row[column] = "OOM"
+            if after_case:
+                after_case(results)
+        say("done", f"{total} case(s) scored", index=total, total=total)
 
     return results

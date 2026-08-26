@@ -25,3 +25,6 @@
 [submodule "vggt-omega"]
 	path = vggt-omega
 	url = https://github.com/facebookresearch/vggt-omega.git
+[submodule "colmap"]
+	path = colmap
+	url = git@github.com:colmap/colmap.git

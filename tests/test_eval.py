@@ -737,6 +737,61 @@ def test_evaluate_hands_over_the_results_after_every_case(tmp_path):
     assert len(results.tables["pose"]) == 2
 
 
+# --- --workers -------------------------------------------------------------------------------
+
+
+def test_score_case_matches_calling_the_metric_directly(tmp_path):
+    from inspection_eval.runner import _score_case
+
+    ds = case_asset(tmp_path)
+    target = target_from_path(ds.root / "predictions" / "da3")
+    result = _score_case(target, VARIANT, "sim3", ["pose"], {"pose": PoseOptions()})
+
+    direct = get("pose").fn(EvalCase(ds, "da3", VARIANT), PoseOptions())
+    assert result.rows == {"pose": direct}
+    assert result.skips == []
+
+
+def test_evaluate_with_workers_matches_the_serial_result(tmp_path):
+    """--workers changes how the work is distributed, never what gets scored or the order the
+    results land in. Compared cell by cell, not with plain `==`, since a pose metric can
+    legitimately return nan (e.g. no baseline pair to compare) and nan != nan."""
+    targets = targets_from_paths([multi_variant_asset(tmp_path)])
+    serial = evaluate(targets, ["pose", "depth"])
+    parallel = evaluate(targets, ["pose", "depth"], workers=2)
+
+    assert parallel.tables.keys() == serial.tables.keys()
+    for name in serial.tables:
+        want, got = serial.tables[name].rows, parallel.tables[name].rows
+        assert len(want) == len(got)
+        for w, g in zip(want, got):
+            assert w.keys() == g.keys()
+            for key in w:
+                if isinstance(w[key], float) and np.isnan(w[key]):
+                    assert isinstance(g[key], float) and np.isnan(g[key])
+                else:
+                    assert w[key] == g[key]
+
+
+def test_workers_can_score_a_metric_registered_at_runtime(tmp_path):
+    """`workers` forks its pool, so a worker inherits REGISTRY exactly as it stands when the
+    pool starts -- including a metric registered locally, here, by this test -- rather than
+    re-importing the metrics package fresh the way a spawned worker would have to."""
+    from inspection_eval.metrics import REGISTRY, register
+
+    @register("runtime_metric")
+    def runtime_metric(case, options):
+        return {"Illum": case.variant.illumination}
+
+    try:
+        results = evaluate(targets_from_paths([multi_variant_asset(tmp_path)]),
+                           ["runtime_metric"], workers=2)
+    finally:
+        REGISTRY.pop("runtime_metric")
+
+    assert sorted(r["Illum"] for r in results.tables["runtime_metric"].rows) == ["night", "sunny"]
+
+
 def test_progress_bar_counts_and_fills():
     import eval as eval_cli
 
@@ -842,6 +897,20 @@ def test_eval_cli_no_stream_writes_only_at_the_end(tmp_path):
     assert rc == 0
     assert seen == [[], []]  # nothing on disk while the run is going
     assert len(list(out.rglob("spy_end.csv"))) == 1
+
+
+def test_eval_cli_workers_flag_runs_end_to_end(tmp_path):
+    """A real process-pool run through the CLI, not just `evaluate()` called in-process."""
+    import csv
+
+    import eval as eval_cli
+
+    rc = eval_cli.main([str(multi_variant_asset(tmp_path)), "--out", str(tmp_path / "out"),
+                        "--no-timestamp", "--metrics", "pose", "--workers", "2", "-q"])
+
+    assert rc == 0
+    rows = list(csv.DictReader((tmp_path / "out" / "pose.csv").open()))
+    assert len(rows) == 2
 
 
 # --- reusing a named folder ------------------------------------------------------------------

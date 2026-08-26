@@ -23,6 +23,7 @@ BASELINES = {
     "vggt-long": "baselines.VGGT-Long.run_sequence:VGGTLong",
     "mpsfm": "baselines.mpsfm.run_sequence:MPSfM",
     "pi-long": "baselines.Pi-Long.run_sequence:PiLong",
+    "colmap": "baselines.colmap.run_sequence:COLMAP",
 }
 
 

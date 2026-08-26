@@ -84,6 +84,11 @@ def parse_args(argv=None):
                    help="how predictions are put in the gt gauge, fitted to the camera centers: "
                         "sim3 (default) also solves the unknown scale, se3 assumes the "
                         "prediction is already metric, none takes the poses as they are")
+    p.add_argument("--workers", type=int, default=1,
+                   help="score this many cases at once, each in its own process (default: "
+                        "%(default)s, sequential); speeds up depth/cloud/pose scoring together "
+                        "since they all run per-case. Opt-in only -- never auto-detected from "
+                        "cpu_count(), since a run commonly shares a box with other jobs")
     p.add_argument("--format", default="csv,md",
                    help=f"comma-separated output formats: {','.join(FORMATS)} "
                         "(default: %(default)s)")
@@ -424,7 +429,7 @@ def main(argv=None) -> int:
             raise SystemExit(describe_gaps(gaps))
 
     results = evaluate(targets, names, args.align, parse_overrides(args.set), filters,
-                       Progress(args.quiet), flush, resume)
+                       Progress(args.quiet), flush, resume, workers=args.workers)
 
     for name, table in results.tables.items():
         if len(table):

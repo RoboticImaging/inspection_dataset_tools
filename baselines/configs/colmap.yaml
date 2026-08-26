@@ -1,0 +1,42 @@
+# Baseline config for classical COLMAP (sparse SfM + dense MVS): its own knobs, nothing about
+# which data to run on. Reusable across assets — pair it with a data config from configs/data/:
+#
+#   python run_sequence.py --data ../configs/data/old_house.yaml --model ../configs/colmap.yaml
+#
+# Every field has a default in run_sequence.py's dataclasses; only override what you need.
+# A copy of this, plus the data config and the variants that ran, is written to
+# <asset>/predictions/<method>/config.yaml after each run.
+
+model:
+  # Sparse stage (colmap automatic_reconstructor). Defaults match this project's own
+  # colmap_sparse_loop.sh: a single self-calibrated camera, no known intrinsics fed in.
+  camera_model: SIMPLE_PINHOLE
+  single_camera: true           # one shared camera for the whole sequence (a fixed render rig)
+  use_gpu: true
+  quality: medium                # low/medium/high/extreme -- automatic_reconstructor's --quality
+  data_type: video                # video/individual -- automatic_reconstructor's --data_type
+
+  # Dense stage (image_undistorter/patch_match_stereo/stereo_fusion). Defaults match this
+  # project's own colmap_dense_loop.sh. geom_consistency: false means only photometric depth maps
+  # get written (no geometric ones) -- leave depth_source at "photometric" unless you also flip
+  # geom_consistency to true.
+  geom_consistency: false
+  max_image_size: 480
+  depth_source: photometric      # "photometric" or "geometric" (PatchMatchStereo output)
+
+output:
+  # -> predictions/{method}/{illumination}/{depths,cam_params}/soil={soil},traj={traj}/
+  #    predictions/{method}/{illumination}/clouds/soil={soil},traj={traj}.ply
+  # (keyed by the full variant, so runs on different illumination/soil never overwrite each other)
+  #
+  # Unlike the feed-forward baselines: COLMAP is classical incremental SfM + MVS, not a depth
+  # model -- only frames it actually registered get written at all (a frame it couldn't place
+  # gets no output, not a bad guess), and a registered frame patch_match_stereo never estimated a
+  # depth map for still falls back to all-NaN. Pose and cloud are fully written either way, but
+  # note COLMAP's own scale is left unrecovered (see run_sequence.py's module docstring) -- only
+  # rotation+translation are aligned to gt, the same accepted convention VGGT-SLAM/VGGT-Long use.
+  method: null                  # null = the baseline's registered name ("colmap"); set it to run
+                                # two configurations of the same baseline side by side
+  overwrite: false              # false = skip sequences that already have predictions
+  min_confidence: null          # COLMAP produces no per-pixel confidence map -- must stay null
+  cloud: true                    # dense fused point cloud from stereo_fusion, not sparse SfM points
