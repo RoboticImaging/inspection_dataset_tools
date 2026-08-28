@@ -12,6 +12,13 @@ gt cams are square-pixel too (`Camera.from_blender` only ever derives one focal 
 predicted fy is silently dropped; fine for the near-square-pixel models these baselines produce.
 """
 
+# Postponed annotation evaluation (PEP 563): lets `str | None`/`np.ndarray | None` etc. below run
+# on Python < 3.10 (e.g. this repo's pixel-perfect-sfm-eigen-src baseline image, Ubuntu 20.04's
+# default Python 3.8) without needing `typing.Optional`/`typing.Union` -- annotations are stored
+# as strings instead of evaluated at class-definition time, so `type.__or__` (added in 3.10) is
+# never actually called.
+from __future__ import annotations
+
 import json
 import os
 from pathlib import Path

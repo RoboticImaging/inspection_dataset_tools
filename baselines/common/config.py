@@ -13,10 +13,22 @@ shape every config had before the split. `load_run_config` accepts either, so ol
 runners that call `load_config(path, Config)` themselves keep working unchanged.
 
 Every knob is a typed, defaulted field in a dataclass; the yaml only overrides what it wants to.
+
+One-off tweaks don't need a new yaml file: every runner's `--set data.trajectory=foo` /
+`--set model.ka.strategy=basic` (repeatable, dotted path into data/model/output) patches the
+loaded yaml in place before it's turned into dataclasses -- see `add_config_args`.
 """
+
+# Postponed annotation evaluation (PEP 563): lets `str | Path`/`str | list | None` etc. below run
+# on Python < 3.10 (e.g. this repo's pixel-perfect-sfm-eigen-src baseline image, Ubuntu 20.04's
+# default Python 3.8) without needing `typing.Optional`/`typing.Union` -- annotations are stored
+# as strings instead of evaluated at class-definition time, so `type.__or__` (added in 3.10) is
+# never actually called.
+from __future__ import annotations
 
 import argparse
 import dataclasses
+import sys
 from pathlib import Path
 
 import yaml
@@ -42,6 +54,34 @@ def _read_yaml(path: str | Path) -> dict:
     return raw
 
 
+def _resolve_field_type(cls, field):
+    """Best-effort resolution of one dataclass field's annotation back to a real type object.
+
+    With `from __future__ import annotations` active anywhere in this module's chain (needed for
+    `str | Path` etc. on Python < 3.10 -- see the top of this file), `field.type` is the
+    unevaluated *string* the annotation was written as (e.g. "ImageReaderConfig"), and
+    `dataclasses.is_dataclass` on a string is always False -- silently skipping every
+    nested-dataclass conversion in `_from_dict` below instead of erroring, so nested config
+    sections would stay plain dicts.
+
+    Deliberately NOT `typing.get_type_hints(cls)`: that resolves every field's annotation on the
+    class at once, and this repo's config dataclasses have genuine `X | Y` (PEP 604) fields
+    (e.g. `DataConfig.trajectory: str | list | None`) that cannot be evaluated on Python < 3.10 at
+    all, ever, postponed or not -- `type.__or__` simply doesn't exist there. get_type_hints would
+    raise on those before ever reaching the one field actually being asked about here. Resolving
+    field-by-field instead means only the *specific* annotation being asked about needs to
+    evaluate; failing to evaluate a union field is fine, since a union is never itself a dataclass
+    the caller would need to recurse into.
+    """
+    if isinstance(field.type, type):
+        return field.type
+    module = sys.modules.get(cls.__module__)
+    try:
+        return eval(field.type, vars(module) if module else {})
+    except TypeError:
+        return None
+
+
 def _from_dict(cls, raw: dict):
     fields = {f.name: f for f in dataclasses.fields(cls)}
     unknown = set(raw) - set(fields)
@@ -52,8 +92,9 @@ def _from_dict(cls, raw: dict):
         if name not in raw:
             continue
         val = raw[name]
-        if dataclasses.is_dataclass(field.type) and isinstance(val, dict):
-            val = _from_dict(field.type, val)
+        field_type = _resolve_field_type(cls, field)
+        if field_type is not None and dataclasses.is_dataclass(field_type) and isinstance(val, dict):
+            val = _from_dict(field_type, val)
         kwargs[name] = val
     return cls(**kwargs)
 
@@ -192,12 +233,15 @@ BASELINE_KEYS = ("model", "output")
 DATA_KEYS = ("dataset", "data")
 
 
-def load_run_config(model_cls, config=None, data=None, model=None) -> RunConfig:
+def load_run_config(model_cls, config=None, data=None, model=None, overrides=()) -> RunConfig:
     """Load a run config from either shape.
 
     `config` is one combined file (`dataset:` + `model:` + `output:`); `data` and `model` are the
     split pair. Either of the split files may be given alone, and either overrides the matching
     half of `config` — so a legacy config can be re-pointed at another asset with just `--data`.
+
+    `overrides` is `--set section.path=value` strings (see `add_config_args`/`apply_overrides`),
+    applied last -- after the yaml files, so a `--set` always wins over whatever a file loaded.
     """
     raw_data, raw_baseline = {}, {}
     if config is not None:
@@ -214,10 +258,14 @@ def load_run_config(model_cls, config=None, data=None, model=None) -> RunConfig:
                          f"expected only {list(BASELINE_KEYS)}"
                          + (" (dataset selection belongs in the data config)"
                             if unknown & set(DATA_KEYS) else ""))
+    raw_baseline.setdefault("model", {})
+    raw_baseline.setdefault("output", {})
+    apply_overrides({"data": raw_data, "model": raw_baseline["model"],
+                     "output": raw_baseline["output"]}, overrides)
     return RunConfig(
         data=_from_dict(DataConfig, raw_data),
-        model=_from_dict(model_cls, raw_baseline.get("model") or {}),
-        output=_from_dict(OutputSpec, raw_baseline.get("output") or {}),
+        model=_from_dict(model_cls, raw_baseline["model"]),
+        output=_from_dict(OutputSpec, raw_baseline["output"]),
     )
 
 
@@ -228,6 +276,44 @@ def _unwrap(raw: dict, keys) -> dict:
             and next(iter(raw)) in keys:
         return val
     return raw
+
+
+def _set_override_path(section: dict, path: list, value, spec: str) -> None:
+    """`section[path[0]][path[1]]...[path[-1]] = value`, creating intermediate dicts as needed
+    (so `--set model.ka.strategy=basic` works whether or not the yaml even has a `ka:` block)."""
+    d = section
+    for key in path[:-1]:
+        d = d.setdefault(key, {})
+        if not isinstance(d, dict):
+            raise SystemExit(f"--set {spec}: {key!r} is not a mapping in the loaded config, "
+                             "can't override into it")
+    d[path[-1]] = value
+
+
+def apply_overrides(sections: dict, overrides) -> None:
+    """Patch `--set section.path.to.field=value` overrides (see `add_config_args`) onto the raw
+    `{"data": ..., "model": ..., "output": ...}` dicts in place, before `_from_dict` turns them
+    into dataclasses -- so a typo'd field name still surfaces via `_from_dict`'s own "unknown
+    config key(s)" check, exactly as if it had been a typo in the yaml file itself, rather than
+    silently setting an attribute `_from_dict` never looks at.
+
+    The value is parsed with `yaml.safe_load`, the same as any yaml scalar, so
+    `--set model.ka.apply=false` produces the bool `False` (not the string `"false"`), numbers
+    parse as numbers, `null` clears an Optional field, and flow-style lists/mappings
+    (`--set data.trajectory=[a,b]`) work too.
+    """
+    for spec in overrides:
+        if "=" not in spec:
+            raise SystemExit(f"--set {spec!r}: expected KEY=VALUE, e.g. model.ka.strategy=basic")
+        key, _, value = spec.partition("=")
+        path = key.split(".")
+        if path[0] not in sections:
+            raise SystemExit(f"--set {spec!r}: unknown section {path[0]!r}, "
+                             f"expected one of {sorted(sections)}")
+        if len(path) < 2:
+            raise SystemExit(f"--set {spec!r}: need a field under {path[0]!r}, "
+                             f"e.g. {path[0]}.some_field=...")
+        _set_override_path(sections[path[0]], path[1:], yaml.safe_load(value), spec)
 
 
 def add_config_args(parser: argparse.ArgumentParser) -> None:
@@ -241,10 +327,15 @@ def add_config_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--model", metavar="YAML",
                         help="baseline config: this baseline's own model:/output: knobs, "
                              "e.g. ../configs/da3.yaml (omit to run every default)")
+    parser.add_argument("--set", metavar="KEY=VALUE", action="append", default=[],
+                        help="override one field of the loaded config without a new yaml file, "
+                             "e.g. --set model.ka.strategy=basic or --set data.trajectory=foo "
+                             "(dotted path, first segment must be data/model/output; repeatable; "
+                             "value is parsed as yaml, so true/false/null/numbers/[a,b] all work)")
 
 
 def config_from_args(args, model_cls) -> RunConfig:
     if not (args.config or args.data):
         raise SystemExit("nothing to run: pass --data <data config> (and usually --model "
                          "<baseline config>), or one combined config file")
-    return load_run_config(model_cls, args.config, args.data, args.model)
+    return load_run_config(model_cls, args.config, args.data, args.model, args.set)

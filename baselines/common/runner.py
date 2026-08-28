@@ -10,6 +10,13 @@ Prediction files themselves are written by `baselines.common.writer`, in the sam
 ground truth uses — see that module's docstring for the camera-json convention.
 """
 
+# Postponed annotation evaluation (PEP 563): lets `np.ndarray | None` etc. below run on
+# Python < 3.10 (e.g. this repo's pixel-perfect-sfm-eigen-src baseline image, Ubuntu 20.04's
+# default Python 3.8) without needing `typing.Optional`/`typing.Union` -- annotations are stored
+# as strings instead of evaluated at class-definition time, so `type.__or__` (added in 3.10) is
+# never actually called.
+from __future__ import annotations
+
 import argparse
 import dataclasses
 from datetime import datetime

@@ -10,6 +10,13 @@ uses the same fit so a colmap/da3/etc. source lines up with gt on screen instead
 manual re-navigate every time you switch sources.
 """
 
+# Postponed annotation evaluation (PEP 563): lets `dict[int, Camera]` etc. below run on
+# Python < 3.9 (e.g. this repo's pixel-perfect-sfm-eigen-src baseline image, Ubuntu 20.04's
+# default Python 3.8) without needing `typing.Dict` -- annotations are stored as strings instead
+# of evaluated at function-definition time, so subscripting the bare `dict` builtin (added in 3.9,
+# PEP 585) is never actually attempted.
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 
 import numpy as np
