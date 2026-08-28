@@ -11,7 +11,7 @@ model:
   # Name of a config under mpsfm/configs/ (no path, no .yaml) -- picks the feature matcher and
   # monocular depth/normal prior combination. See that directory, or the submodule's own README
   # ("Our favorite configurations"), for the full set of options.
-  conf: sp-lg_m3dv2
+  conf: sp-lg_dav2
   extract: []                   # priors to force re-extraction of; [] reuses this run's own cache
   verbose: 0
 
