@@ -24,6 +24,9 @@ BASELINES = {
     "mpsfm": "baselines.mpsfm.run_sequence:MPSfM",
     "pi-long": "baselines.Pi-Long.run_sequence:PiLong",
     "colmap": "baselines.colmap.run_sequence:COLMAP",
+    "glomap": "baselines.glomap.run_sequence:GLOMAP",
+    "pixel-perfect-sfm": "baselines.pixel-perfect-sfm.run_sequence:PixelPerfectSfM",
+    "vidmap": "baselines.vidmap.run_sequence:VidMap",
 }
 
 
