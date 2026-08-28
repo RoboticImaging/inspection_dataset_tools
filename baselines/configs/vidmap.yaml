@@ -1,0 +1,351 @@
+# Baseline config for VidMap (video-aware SfM frontend + COLMAP-derived global mapper): its own
+# knobs, nothing about which data to run on. Reusable across assets — pair it with a data config
+# from configs/data/:
+#
+#   python run_sequence.py --data ../configs/data/old_house.yaml --model ../configs/vidmap.yaml
+#
+# Every field has a default in run_sequence.py's dataclasses -- vidmap's own compiled-in default
+# (its "uncalib/base" preset) unless a comment says otherwise. Fields mirror vidmap's own
+# FrontendConfig/MappingConfig schema exactly (frontend.*/mapping.mapper.*), verified directly
+# against vidmap/vidmap/configuration/config.py and its own frontend/options, mapper/options
+# source -- not the README's doc examples, per this repo's established "verify against source"
+# discipline. A copy of this, plus the data config and the variants that ran, is written to
+# <asset>/predictions/<method>/config.yaml after each run.
+#
+# ------------------------------------------------------------------------------------------
+# Known vs. self-calibrated intrinsics ("calib" vs "uncalib" mode)
+# ------------------------------------------------------------------------------------------
+# The default below ("uncalib") self-calibrates via GeoCalib -- consistent with baselines/colmap
+# and baselines/glomap's own self-calibrating defaults (not baselines/mpsfm's known-intrinsics
+# one). To switch to known-intrinsics mode (vidmap's own "calib" preset), these six fields move
+# together -- change all of them, not just one, or the mapper's own intrinsics prior weighting
+# won't match what "calib" actually means:
+#   frontend.use_geocalib: false                          (was: true)
+#   frontend.view_graph_calibration: false                (was: true)
+#   frontend.keyframes.selection.intrinsics_source: ground_truth   (was: geocalib)
+#   mapping.mapper.ba.annealing.prior_std_factor: null     (was: 0.1 -- falls back to the next line)
+#   mapping.mapper.ba.intrinsics.prior_std_factor: 1.0     (was: 0.01 -- a much stronger prior,
+#                                                            appropriate once intrinsics are known)
+#   mapping.mapper.vgc.filter.enabled: false               (was: true)
+# run_sequence.py also then writes and passes an --intrinsics sidecar file automatically once
+# frontend.use_geocalib is false -- nothing else to configure for that part.
+#
+# ------------------------------------------------------------------------------------------
+# Smoother trajectories on long sequences (experimental)
+# ------------------------------------------------------------------------------------------
+# vidmap's own second "recommended configuration" (its "smooth_trajectory" preset) adds a
+# keyframe-coordinate trajectory-smoothing prior, off by default here (both *_weight fields are
+# 0.0). To turn it on:
+#   mapping.mapper.gp.temporal_acceleration.coordinate: keyframe_index   (was: timestamp)
+#   mapping.mapper.gp.temporal_acceleration.stddev: 3.0                  (was: 1.0)
+#   mapping.mapper.gp.temporal_acceleration.first_pass_weight: 10.0      (was: 0.0)
+#   mapping.mapper.gp.temporal_acceleration.second_pass_weight: 10.0     (was: 0.0)
+#   mapping.mapper.gp.temporal_acceleration.first_pass_huber_width: 1000000000.0   (was: 1.0)
+#   mapping.mapper.gp.temporal_acceleration.second_pass_huber_width: 1000000000.0  (was: 1.0)
+# (the last two effectively remove Huber robustification, making the smoothness loss purely
+# quadratic). vidmap's own docs call this "experimental" -- try it if long-sequence trajectories
+# look jittery, not as a default.
+
+model:
+  frontend_conf: uncalib/base   # rarely needs changing -- see run_sequence.py's own comment
+  mapping_conf: uncalib/base
+
+  frontend:
+    roma:
+      compile: true
+
+    keyframes:
+      matching:
+        batch_size: 8
+        num_workers: 16
+        resize_to_shape: [560, 560]
+        interpolation: torch_bicubic
+      selection:
+        max_normalized_keypoint_drift: 0.11
+        target_frac: 0.4
+        certainty_threshold: 0.01
+        force_gt_keyframes: false   # only meaningful for a dataset with known keyframe
+                                    # timestamps -- not applicable to this repo's own data
+        intrinsics_source: geocalib   # "geocalib" or "ground_truth" -- see the calib-mode note above
+      features:
+        preprocessing:
+          grayscale: false
+          resize_max: 1200
+          resize_force: false
+          interpolation: cv2_area
+        nms_radius: 5
+        max_num_keypoints: 2000
+        sub_pixel: false
+
+    tracks:
+      images:
+        grayscale: false
+        resize_max: 1200
+        resize_force: true
+        interpolation: cv2_area
+      propagation:
+        num_workers: 4
+        nms_radius: 3
+        max_kps: 1500
+        min_conf: 0.05
+        window: 9
+        max_sequential_track_sigma_roma_px: 8.0
+        density_thin_k: 0.05
+        density_thin_std: 0.013
+        tvg_max_epipolar_error: 4.0
+        tvg_max_iterations: 50000
+        tvg_min_iterations: 50
+        tvg_min_inliers: 50
+        salient_density_ref_kps: 2000
+        salient_density_std: 0.1
+        salient_density_max_scale: 3.0
+        salient_density_power: 1.0
+        lt_cov_scale: 4.0
+        multiflow_hops: [9, 7, 5, 3, 1]
+
+    loop_closure:
+      retrieval_min_score: 0.1
+      nquery: 10
+      tcorr_min_matches: 200
+      lc_pair_nms: true
+      lc_pair_nms_radius: 2
+      lc_match_thresh: 0.05
+
+    depth:
+      backend:
+        type: da3_video
+        window_size: 1
+        ref_view_strategy: middle   # "middle", "first", or "saddle_balanced"
+        process_res: 504
+      cache_map: true
+      preprocessing:
+        grayscale: false
+        resize_max: null
+        resize_force: false
+        interpolation: cv2_area
+      batch_size: 1
+      num_workers: 4
+
+    camera_priors:
+      max_images: 30
+
+    preparation:
+      lc:
+        exclude_lc_matches: false
+        exclude_window_lc: false
+        min_lc_score: 0.0
+      geom_verif:
+        max_H_inlier_ratio: 0.8
+        min_num_inliers: 15
+        ransac_max_num_trials: 20000
+        ransac_min_inlier_ratio: 0.25
+        ransac_max_error: 4.0
+
+    use_geocalib: true              # see the calib-mode note above
+    view_graph_calibration: true
+
+  mapping:
+    mapper:
+      setup:
+        depth_uncertainty_scale: 0.05
+
+      depth_consistency:
+        enabled: true
+        depth_outlier_propagation: boundary   # "boundary" or "forward"
+        mark_boundary_depth_outliers: true
+        depth_ratio_threshold: 1.3
+
+      ba:
+        normal:
+          iterations: 3
+          kp_stddev: 2.0
+          reproj_loss_name: soft_l1   # "trivial", "soft_l1", "cauchy", or "huber"
+          robust_risky_depth: false
+          observation_filter_multiplier: 4.0
+          convergence_filtered_point_ratio: 0.001
+        annealing:
+          iterations: 3
+          kp_std: 0.5
+          depth_magnitude_multiplier: 0.25
+          reproj_loss_name: soft_l1
+          fix_rotations: false
+          robust_risky_depth: true
+          depth_cutoff_cauchy_scales: 2
+          depth_param_multiplier: 0.25
+          prior_std_factor: 0.1   # null falls back to ba.intrinsics.prior_std_factor -- see the
+                                  # calib-mode note above
+          mad_sigma_floor: 0.1
+          observation_filter_multiplier: 4.0
+          convergence_filtered_point_ratio: 0.001
+          final_depth_param_multiplier: 0.125
+        triangulation:
+          min_angle: 0.001
+          ignore_two_view_tracks: false
+          create_max_angle_error: 3.0
+          re_max_angle_error: 3.0
+          re_max_trials: 1000000
+          re_min_ratio: 1.0
+          relaxed_max_transitivity: 1000
+        depth:
+          param_multiplier: 1.0
+          magnitude_multiplier: 1.0
+          cutoff_cauchy_scales: 0
+          reg_loss_name: cauchy         # "trivial", "cauchy", or "soft_l1"
+          scale_std: 1.0
+          target_stddev_multiplier: 1.0
+          scale_reg_loss_name: soft_l1  # "trivial", "huber", "cauchy", or "soft_l1"
+          risky_track_length_threshold: 3
+          risky_triangulation_angle_deg: 1.0
+        intrinsics:
+          use_prior: true
+          prior_std_factor: 0.01   # see the calib-mode note above
+          refine_principal_point: false
+        solver_backend:
+          linear_solver: sparse_schur       # "dense_schur", "sparse_schur", or "iterative_schur"
+          preconditioner: schur_jacobi       # "jacobi", "schur_jacobi", "cluster_jacobi", or
+                                             # "cluster_tridiagonal"
+          use_cuda: false   # needs Ceres 2.3+ built with CUDA+cuDSS -- not what
+                            # baselines/vidmap/Dockerfile builds; leave false unless you've
+                            # separately rebuilt the image with a GPU-capable Ceres
+        retriangulation_reproj_multiplier: 8.0
+        first_iteration_error_multiplier: 2.0
+        multiply_errors: 2.0
+        reproj_loss_scale: 1.5
+        num_threads: null
+        variable_point_track_length_threshold: 15
+        post_annealing_point_refinement: true
+
+      vgc:
+        filter:
+          enabled: true   # see the calib-mode note above
+          num_threads: null
+          min_matches: 10
+          min_cheirality_points: 5
+          subsample_size: 50
+          strong_pair_match_count: 50
+          min_median_triangulation_angle_deg: 16.0
+          max_abs_forward_translation_ratio: 0.95
+          min_strong_kept_pairs: 50
+        calibration:
+          unlock_focal: true
+
+      inlier_thresholds:
+        max_epipolar_error_E: 8.0
+        max_epipolar_error_F: 8.0
+        max_epipolar_error_H: 8.0
+        min_angle_from_epipole: 0.001
+        max_angle_error: 1.0
+        min_triangulation_angle: 0.001
+        min_inlier_num: 5.0
+        min_inlier_ratio: 0.0
+
+      mdrp:
+        max_workers: null
+        compute_reproj_error_outliers: true
+        reproj_outlier_threshold: 5.0
+        ransac_max_iterations: 50000
+        ransac_max_epipolar_error: 4.0
+        depth_stddev_multiplier: 1.0
+
+      gp:
+        common:
+          use_lc_observations: true
+          use_metric_depth_constraint: true
+          roundtrip_before_ba: false          # replay-only
+          canonical_checkpoint: false          # replay-only
+          bearing_kp_stddev: 8.0
+          optimize_depth_map_scales: true
+          use_log_scale_for_depth_map_scales: false
+          smooth_log_linear_transition: false
+          log_linear_threshold: 0.1
+          random_seed: 1
+          loss_function_type: huber   # "trivial", "soft_l1", "cauchy", or "huber"
+          loss_function_weight: 1.0
+          loss_function_scale: 0.1
+          apply_uncalibrated_loss_downweight: false
+          num_threads: null
+          parameter_ordering_strategy: grouped   # or "deterministic_singleton_groups"
+          camera_center_strategy: frame           # "frame" or "image"
+          random_init_scale: 100.0
+          zero_residuals_behind_camera: false
+        solver_backend:
+          linear_solver: sparse_schur
+          preconditioner: schur_jacobi
+          use_cuda: false
+        first_pass:
+          scale_prior_stddev: 0.05
+          max_iterations: 100
+          function_tolerance_when_second: 1.0e-4
+          gradient_tolerance_when_second: 1.0e-8
+          parameter_tolerance_when_second: 1.0e-6
+          scale_reg_loss_name: trivial
+          scale_reg_weight: 1.0
+          initialize_warm_start_scales: true
+          loss_lc_geometry: {name: cauchy, scale: 2.0, weight: 0.4}
+          loss_lc_depth: {name: cauchy, scale: 2.0, weight: 0.4}
+          loss_normal_geometry: {name: huber, scale: 1.0, weight: 1.0}
+          loss_normal_depth: {name: trivial, scale: 1.0, weight: 1.0}
+        second_pass:
+          enabled: true
+          scale_prior_stddev: 0.05
+          max_iterations: 100
+          use_log_depth_residual: true
+          relax_angular_stddevs: 1.0
+          scale_reg_loss_name: huber
+          scale_reg_weight: 1.0
+          center_init_mode: native   # "native" or "python_frame_centers"
+          loss_lc_geometry: {name: cauchy, scale: 4.0, weight: 1.0}
+          loss_lc_depth: {name: cauchy, scale: 4.0, weight: 1.0}
+          loss_normal_geometry: {name: huber, scale: 1.0, weight: 1.0}
+          loss_normal_depth: {name: huber, scale: 1.0, weight: 1.0}
+        track_filter:
+          skip_zero_observation_points: false   # replay-only
+          update_point3d_errors: false          # replay-only
+          min_num_views_per_track: 2
+          loss_normal_depth_outlier: {name: cauchy, scale: 3.0, weight: 1.0}
+          depth_prior_outlier_max_depth: null
+          depth_prior_outlier_stages: gp1   # "gp1" or "gp1_gp2"
+        temporal_acceleration:
+          # See "Smoother trajectories on long sequences" above for the combination that
+          # reproduces vidmap's own "smooth_trajectory" recommended config.
+          coordinate: timestamp   # "timestamp" or "keyframe_index"
+          stddev: 1.0
+          first_pass_weight: 0.0
+          second_pass_weight: 0.0
+          first_pass_dead_zone: 0.0
+          first_pass_huber_width: 1.0
+          second_pass_dead_zone: 0.0
+          second_pass_huber_width: 1.0
+
+      ra:
+        filter_risky_loop_closure_pairs: false
+        filter_unregistered_images: true
+        random_seed: 1                # pinned for byte-identical rotation averaging
+        max_rotation_error_deg: 0.0   # 0.0 disables native post-RA edge filtering
+        video_tracking_huber_scale: 0.1
+        video_lc_cauchy_scale: 0.05
+        num_threads: null             # null means one thread, -1 means every core
+
+      tracks:
+        include_loop_closure_observations: true
+        min_num_views_per_track: 2
+        max_num_views_per_track: 100
+        two_view_depth_gate: true
+        loop_closure_second_pass: true
+
+output:
+  # -> predictions/{method}/{illumination}/{depths,cam_params}/soil={soil},traj={traj}/
+  #    predictions/{method}/{illumination}/clouds/soil={soil},traj={traj}.ply
+  # (keyed by the full variant, so runs on different illumination/soil never overwrite each other)
+  #
+  # Unlike the feed-forward baselines: VidMap is classical (global) SfM + a video-aware frontend,
+  # not a depth model -- only frames vidmap actually registered get written at all, and a
+  # registered frame with no cached depth map falls back to all-NaN. Pose and cloud are fully
+  # written either way, but scale is left unrecovered (see run_sequence.py's module docstring) --
+  # only rotation+translation are aligned to gt, the same accepted convention baselines/colmap
+  # and VGGT-SLAM/VGGT-Long use.
+  method: null                  # null = the baseline's registered name ("vidmap"); set it to run
+                                # two configurations of the same baseline side by side
+  overwrite: false              # false = skip sequences that already have predictions
+  min_confidence: null          # vidmap produces no per-pixel confidence map -- must stay null
+  cloud: true                    # sparse reconstruction points -- no dense-MVS stage exists here
