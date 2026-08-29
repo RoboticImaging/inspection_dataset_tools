@@ -6,6 +6,8 @@ seeded, and the result is cached on disk keyed by (mesh, size, mtime, n): the ac
 to hundreds of MB and loading one costs far more than every metric in this repo put together.
 """
 
+import os
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -31,7 +33,20 @@ def sample_mesh(path: Path, n_points: int, cache_dir: Path = CACHE_DIR,
     if len(pts) == 0:
         raise ValueError(f"{path} sampled to no finite point")
     cache_dir.mkdir(parents=True, exist_ok=True)
-    np.save(cache, pts)
+    # Every variant of the same asset shares this exact cache path (same mesh, same default
+    # seed), so with --workers > 1 two processes racing to sample it for the first time is the
+    # common case, not an edge one. Written to a temp file in the same directory, then swapped
+    # into place with os.replace -- atomic on POSIX for a same-filesystem rename -- so a
+    # concurrent reader always sees either the old (missing) state or the fully-written file,
+    # never a torn np.save() in progress.
+    fd, tmp_name = tempfile.mkstemp(dir=cache_dir, prefix=f"{cache.stem}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            np.save(f, pts)
+        os.replace(tmp_name, cache)
+    except BaseException:
+        os.unlink(tmp_name)
+        raise
     return pts
 
 

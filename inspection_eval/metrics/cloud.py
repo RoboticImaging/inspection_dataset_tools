@@ -44,7 +44,19 @@ class CloudOptions:
     completeness_mesh: str = "completeness"
 
 
-@register("cloud", needs=(CAP_CLOUD,), options=CloudOptions)
+def _columns(o: CloudOptions) -> list[str]:
+    """The keys `cloud_metrics` returns for `o`, without touching a case -- see
+    `metrics.base`'s docstring for why this exists. Kept in lockstep with `cloud_metrics` by
+    `test_cloud_columns_match_what_the_metric_actually_returns`."""
+    cols = ["Accuracy (m)", "Accuracy median (m)", "Completeness (m)", "Completeness median (m)",
+           "Chamfer (m)"]
+    for tau in o.thresholds:
+        cols += [f"Precision @{tau}m", f"Recall @{tau}m", f"F-score @{tau}m"]
+    cols += ["Pred points", "Cropped %", "Cloud source"]
+    return cols
+
+
+@register("cloud", needs=(CAP_CLOUD,), options=CloudOptions, columns=_columns)
 def cloud_metrics(case: EvalCase, o: CloudOptions) -> dict:
     acc_kind = case.gt_mesh(o.accuracy_mesh)
     comp_kind = case.gt_mesh(o.completeness_mesh)

@@ -1,0 +1,214 @@
+# Baseline config for GLOMAP (global SfM, via colmap's own `global_mapper` command) + dense MVS:
+# its own knobs, nothing about which data to run on. Reusable across assets — pair it with a data
+# config from configs/data/:
+#
+#   python run_sequence.py --data ../configs/data/old_house.yaml --model ../configs/glomap.yaml
+#
+# Every field has a default in run_sequence.py's dataclasses -- colmap's own compiled-in default
+# unless a comment there says otherwise -- only override what you need. image_reader through
+# stereo_fusion mirror ../configs/colmap.yaml's own groups exactly (same underlying
+# feature_extractor/exhaustive_matcher/dense-stage flags); view_graph_calibration and
+# global_mapper replace colmap.yaml's mapper/incremental_mapper/triangulation groups -- see
+# run_sequence.py's own `ModelConfig` for exactly which struct/file:line each default came from.
+#
+# A copy of this, plus the data config and the variants that ran, is written to
+# <asset>/predictions/<method>/config.yaml after each run.
+
+model:
+  image_reader:
+    camera_model: SIMPLE_PINHOLE   # self-calibrated, no known intrinsics fed in
+    single_camera: true            # one shared camera for the whole sequence (a fixed render rig)
+    single_camera_per_folder: false
+    single_camera_per_image: false
+    default_focal_length_factor: 1.2
+    camera_params: null            # e.g. "fx,fy,cx,cy" -- null = self-calibrate from scratch
+    mask_path: null
+    camera_mask_path: null
+    existing_camera_id: null
+
+  feature_extraction:
+    use_gpu: true
+    num_threads: -1
+    gpu_index: "-1"
+    max_image_size: -1
+
+  sift_extraction:
+    max_num_features: 8192
+    first_octave: -1
+    num_octaves: 4
+    octave_resolution: 3
+    peak_threshold: 0.006666666666666667
+    edge_threshold: 10.0
+    estimate_affine_shape: false
+    max_num_orientations: 2
+    upright: false
+    domain_size_pooling: false
+    dsp_min_scale: 0.16666666666666666
+    dsp_max_scale: 3.0
+    dsp_num_scales: 10
+
+  feature_matching:
+    num_threads: -1
+    use_gpu: true
+    gpu_index: "-1"
+    max_num_matches: 32768
+    guided_matching: false
+    skip_geometric_verification: false
+    rig_verification: false
+    skip_image_pairs_in_same_frame: false
+
+  sift_matching:
+    max_ratio: 0.8
+    max_distance: 0.7
+    cross_check: true
+    cpu_brute_force_matcher: false
+    lightglue_min_score: 0.1
+
+  two_view_geometry:
+    min_num_inliers: 15
+    multiple_models: false
+    compute_relative_pose: false
+    detect_watermark: true
+    multiple_ignore_watermark: true
+    watermark_detection_max_error: 4.0
+    filter_stationary_matches: false
+    stationary_matches_max_error: 4.0
+    use_degensac: false
+    max_error: 4.0
+    confidence: 0.999
+    max_num_trials: 10000
+    min_inlier_ratio: 0.25
+    random_seed: -1
+
+  exhaustive_matching:
+    block_size: 50
+
+  view_graph_calibration:
+    # colmap's own docs (doc/cli.rst) call this "optional but recommended" specifically when
+    # reliable focal-length priors aren't available -- exactly our self-calibrated SIMPLE_PINHOLE
+    # situation -- so it's on by default. It mutates its database in place; run_sequence.py works
+    # off a copy, matching glomap_loop.sh's own `cp database.db database_global.db` first.
+    enabled: true
+    cross_validate_prior_focal_lengths: true
+    min_calibrated_pair_ratio: 0.5
+    reestimate_relative_pose: true
+    min_focal_length_ratio: 0.1
+    max_focal_length_ratio: 10.0
+    max_calibration_error: 2.0
+    relpose_max_error: 1.0
+    relpose_min_num_inliers: 30
+    relpose_min_inlier_ratio: 0.25
+
+  global_mapper:
+    # General
+    min_num_matches: 15
+    ignore_watermarks: false
+    num_threads: -1
+    random_seed: -1
+    decompose_relative_pose: true
+    multiple_models: true          # reconstruct every connected component (why the
+                                    # merge_submodels step in run_sequence.py exists at all)
+    min_model_size: 3
+    ba_num_iterations: 3
+    # Stage skip toggles -- nothing skipped by default
+    skip_rotation_averaging: false
+    skip_track_establishment: false
+    skip_global_positioning: false
+    skip_bundle_adjustment: false
+    skip_retriangulation: false
+    # Track establishment
+    track_intra_image_consistency_threshold: 10.0
+    track_required_tracks_per_view: null   # null = colmap's own "unbounded" (raw default INT_MAX)
+    track_min_num_views_per_track: 3
+    keep_max_num_tracks: null              # null = colmap's own "keep all" (raw default INT_MAX)
+    # Global positioning
+    gp_use_gpu: true
+    gp_gpu_index: "-1"
+    gp_optimize_positions: true
+    gp_optimize_points: true
+    gp_optimize_scales: true
+    gp_loss_function_scale: 0.1
+    gp_max_num_iterations: 100
+    # Bundle adjustment
+    ba_refine_focal_length: true
+    ba_refine_principal_point: false
+    ba_refine_extra_params: true
+    refine_sensor_from_rig: true
+    ba_refine_rig_from_world: true
+    ba_refine_points3D: true
+    ba_min_track_length: 3
+    ba_backend: null               # "CERES" or "CASPAR"
+    ba_gpu_index: "-1"
+    ba_ceres_use_gpu: true
+    ba_ceres_loss_function_scale: 1.0
+    ba_ceres_max_num_iterations: 200
+    ba_skip_fixed_rotation_stage: false
+    ba_skip_joint_optimization_stage: false
+    # Retriangulation
+    tri_complete_max_reproj_error: 15.0
+    tri_merge_max_reproj_error: 15.0
+    tri_min_angle: 1.0
+    # Rotation averaging
+    ra_use_gravity: false          # no GPS/IMU gravity prior for this synthetic dataset
+    ra_use_stratified: true
+    ra_max_rotation_error_deg: 10.0
+    ra_reweighting: null           # "UNIFORM" or "INLIER_MATCH_COUNT"
+    # Thresholds
+    max_angular_reproj_error_deg: 1.0
+    max_normalized_reproj_error: 0.01
+    min_tri_angle_deg: 1.0
+
+  patch_match:
+    max_image_size: 480
+    window_radius: 5
+    window_step: 1
+    sigma_spatial: 5.0
+    sigma_color: 0.2
+    num_samples: 15
+    ncc_sigma: 0.6
+    min_triangulation_angle: 1.0
+    incident_angle_sigma: 0.9
+    num_iterations: 5
+    geom_consistency: false
+    geom_consistency_regularizer: 0.3
+    geom_consistency_max_cost: 3.0
+    filter: true
+    filter_min_ncc: 0.1
+    filter_min_triangulation_angle: 3.0
+    filter_min_num_consistent: 2
+    filter_geom_consistency_max_cost: 1.0
+    num_threads: -1
+    write_consistency_graph: false
+    allow_missing_files: false
+
+  stereo_fusion:
+    max_image_size: 480
+    min_num_pixels: 5
+    max_num_pixels: 10000
+    max_traversal_depth: 100
+    max_reproj_error: 2.0
+    max_depth_error: 0.01
+    max_normal_error: 10.0
+    check_num_images: 50
+    use_cache: false
+    cache_size: 32
+    mask_path: null
+
+  depth_source: photometric      # "photometric" or "geometric"
+
+output:
+  # -> predictions/{method}/{illumination}/{depths,cam_params}/soil={soil},traj={traj}/
+  #    predictions/{method}/{illumination}/clouds/soil={soil},traj={traj}.ply
+  # (keyed by the full variant, so runs on different illumination/soil never overwrite each other)
+  #
+  # Unlike the feed-forward baselines: GLOMAP is classical global SfM + MVS, not a depth model --
+  # only frames it actually registered get written at all, and a registered frame
+  # patch_match_stereo never estimated a depth map for still falls back to all-NaN. Pose and
+  # cloud are fully written either way, but GLOMAP's own scale is left unrecovered (see
+  # run_sequence.py's module docstring) -- only rotation+translation are aligned to gt, the same
+  # accepted convention VGGT-SLAM/VGGT-Long use.
+  method: null                  # null = the baseline's registered name ("glomap"); set it to run
+                                # two configurations of the same baseline side by side
+  overwrite: false              # false = skip sequences that already have predictions
+  min_confidence: null          # GLOMAP produces no per-pixel confidence map -- must stay null
+  cloud: true                    # dense fused point cloud from stereo_fusion, not sparse SfM points

@@ -10,6 +10,13 @@ Prediction files themselves are written by `baselines.common.writer`, in the sam
 ground truth uses — see that module's docstring for the camera-json convention.
 """
 
+# Postponed annotation evaluation (PEP 563): lets `np.ndarray | None` etc. below run on
+# Python < 3.10 (e.g. this repo's pixel-perfect-sfm-eigen-src baseline image, Ubuntu 20.04's
+# default Python 3.8) without needing `typing.Optional`/`typing.Union` -- annotations are stored
+# as strings instead of evaluated at class-definition time, so `type.__or__` (added in 3.10) is
+# never actually called.
+from __future__ import annotations
+
 import argparse
 import dataclasses
 from datetime import datetime
@@ -22,7 +29,8 @@ from inspection_viz.config import Layout, fill_template
 from inspection_viz.dataset import AssetDataset, Frame, Variant
 
 from .config import OutputSpec, RunConfig, add_config_args, config_from_args
-from .writer import cloud_path, ensure_dir, frame_stem, output_dirs, write_cam, write_cloud, write_depth
+from .writer import (clear_oom, cloud_path, ensure_dir, frame_stem, oom_path, output_dirs,
+                     write_cam, write_cloud, write_depth, write_oom)
 
 
 def variant_label(variant: Variant) -> str:
@@ -49,15 +57,25 @@ class SequenceOutput:
         binds = self.variant.as_dict()
         self.depth_dir, self.cam_dir = output_dirs(self.root, self.layout, self.method, binds)
         self.cloud_path = cloud_path(self.root, self.layout, self.method, binds)
+        self.oom_path = oom_path(self.root, self.layout, self.method, binds)
 
     @property
     def label(self) -> str:
         return variant_label(self.variant)
 
     def exists(self) -> bool:
-        """Has a previous run already written this sequence? Any depth file counts: a run that
-        died halfway still leaves a dir behind, and re-running it is the point of `overwrite`."""
-        return self.depth_dir.is_dir() and any(self.depth_dir.iterdir())
+        """Has a previous run already written this sequence? Requires at least one depth file (no
+        dir at all means the run never started) and, when this baseline writes a fused cloud, that
+        cloud actually being on disk too -- write_cloud is the last thing `Baseline.run` does, so
+        its absence means the process died partway through (e.g. an uncaught kill mid-sequence,
+        rather than the GPU OOM `run_baseline` itself catches and marks). Without this, a variant
+        that died after writing some depth frames but before the cloud step would be silently
+        treated as done forever, disagreeing with check_completion_status.py, which uses the same
+        cloud-presence signal to decide COMPLETE/PARTIAL. Re-running it is the point of
+        `overwrite`."""
+        if not (self.depth_dir.is_dir() and any(self.depth_dir.iterdir())):
+            return False
+        return self.cloud_path.is_file() if self.spec.cloud else True
 
     def scratch_dir(self, name: str) -> Path:
         """A working dir beside the fused cloud, for a model's own exporter to write into."""
@@ -79,12 +97,23 @@ class SequenceOutput:
             depth = np.where(np.asarray(conf) >= self.spec.min_confidence, depth, np.nan) \
                       .astype(np.float32)
         stem = frame_stem(index)
-        write_depth(self.depth_dir / f"{stem}.exr", depth)
+        write_depth(self.depth_dir / f"{stem}.exr", depth,
+                   verify=self.spec.verify_writes, attempts=self.spec.write_attempts)
         write_cam(self.cam_dir / f"{stem}.json", c2w, K, width=intrinsics_width)
 
     def write_cloud(self, points: np.ndarray, colors: np.ndarray | None = None) -> None:
         """The one fused world-space cloud for this sequence."""
-        write_cloud(self.cloud_path, points, colors)
+        write_cloud(self.cloud_path, points, colors,
+                   verify=self.spec.verify_writes, attempts=self.spec.write_attempts)
+
+    def mark_oom(self, message: str) -> None:
+        """Leave a marker recording that this sequence hit a GPU OOM, so a later scan can tell
+        "never run" apart from "ran and ran out of memory" without re-running anything."""
+        write_oom(self.oom_path, message)
+
+    def clear_oom(self) -> None:
+        """Remove a stale OOM marker, e.g. after this sequence is successfully re-run."""
+        clear_oom(self.oom_path)
 
 
 class Baseline:
@@ -115,7 +144,10 @@ def run_baseline(baseline: Baseline, cfg: RunConfig, layout: Layout = Layout(),
     """Run `baseline` over every sequence `cfg.data` selects. Returns the variants it wrote.
 
     Sequences that already have output are skipped unless `output.overwrite` is set, so a run
-    interrupted halfway (or extended to more variants later) can simply be started again.
+    interrupted halfway (or extended to more variants later) can simply be started again. A
+    sequence that hits a GPU OOM is marked (see `SequenceOutput.mark_oom`, `AssetDataset.oom_path`)
+    and the run then stops -- whatever was already done stays, and a re-run picks up where this
+    one left off, skipping the sequences that already have output.
     """
     ds = AssetDataset(cfg.data.asset, layout)
     method = cfg.output.method or baseline.name
@@ -140,7 +172,7 @@ def run_baseline(baseline: Baseline, cfg: RunConfig, layout: Layout = Layout(),
     say(f"{len(todo)} sequence(s) to run for method {method!r} in {ds.root}")
     baseline.setup()
 
-    done = []
+    done, oom_hit = [], None
     for i, out in enumerate(todo, start=1):
         frames = cfg.data.select(ds.sequence(out.variant))
         if not frames:
@@ -148,7 +180,21 @@ def run_baseline(baseline: Baseline, cfg: RunConfig, layout: Layout = Layout(),
                 "skipping")
             continue
         say(f"[{i}/{len(todo)}] {out.label}: {len(frames)} frames")
-        baseline.run(frames, out)
+        try:
+            baseline.run(frames, out)
+        except RuntimeError as exc:
+            if "out of memory" not in str(exc).lower():
+                raise
+            try:
+                import torch
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+            out.mark_oom(str(exc))
+            oom_hit = out.variant
+            say(f"  GPU OOM, marked: {exc}")
+            break
+        out.clear_oom()
         done.append(out.variant)
         say(f"  wrote frames {frames[0].index}..{frames[-1].index}")
 
@@ -157,6 +203,9 @@ def run_baseline(baseline: Baseline, cfg: RunConfig, layout: Layout = Layout(),
                                 kept=[o.variant for o in skipped])
         say(f"done: {len(done)} sequence(s) -> predictions/{method}/ under {ds.root}")
         say(f"  run config: {path.relative_to(ds.root)}")
+    if oom_hit is not None:
+        raise SystemExit(f"GPU OOM on {variant_label(oom_hit)}; marked predictions/{method}/... "
+                         "and stopped (re-run to continue with the remaining sequences)")
     return done
 
 

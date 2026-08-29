@@ -28,7 +28,7 @@ model:
     run_os: False
     submap_size: 16
     overlapping_window_size: 1
-    max_loops: 1
+    max_loops: 0
 
 output:
   # -> predictions/{method}/{illumination}/{depths,cam_params}/soil={soil},traj={traj}/
@@ -36,6 +36,6 @@ output:
   # (keyed by the full variant, so runs on different illumination/soil never overwrite each other)
   method: null            # null = the baseline's registered name ("vggt-slam"); set it to run
                            # two configurations of the same baseline side by side
-  overwrite: false        # false = skip sequences that already have predictions
+  overwrite: false         # false = skip sequences that already have predictions
   min_confidence: null    # unused here -- point-cloud confidence filtering is model.run.conf_threshold, applied inside the SLAM backend itself
   cloud: true              # fused .ply, unprojected from predicted depth + poses

@@ -1,0 +1,159 @@
+\begin{table}
+\caption{Headline scores on the three assets every method completed}
+\label{tab:t1_main_results}
+\begin{tabular}{lrrrrrrrlr}
+\toprule
+ & AUC@30 ↑ & RTA@5 ↑ & RRA@5 ↑ & rel. MAE ↓ & Acc@1.05 ↑ & F@0.25m ↑ & Chamfer ↓ & assets done & OOM on \\
+method &  &  &  &  &  &  &  &  &  \\
+\midrule
+colmap/no\_gt & 0.992 & 99.3 & 99.3 & 0.148 & 0.766 & 0.584 & 0.325 & 6/7 & 0 \\
+mpsfm & 0.815 & 79.5 & 92.7 & 0.233 & 0.256 & 0.317 & 0.962 & 3/7 & 0 \\
+vggt & 0.702 & 42.7 & 94.4 & 0.077 & 0.556 & 0.405 & 0.355 & 4/7 & 3 \\
+vggt-long & 0.75 & 52.5 & 94.1 & 0.103 & 0.393 & 0.284 & 0.51 & 6/7 & 0 \\
+vggt-slam & 0.78 & 51.2 & 93.4 & 0.147 & 0.189 & 0.282 & 0.744 & 6/7 & 0 \\
+vggt-omega & 0.913 & 85 & 99.3 & 0.032 & 0.857 & 0.595 & 0.297 & 3/7 & 4 \\
+da3 & 0.979 & 98.8 & 99.3 & 0.027 & 0.898 & 0.658 & 0.282 & 3/7 & 4 \\
+da3\_streaming & 0.979 & 99 & 99.3 & 0.031 & 0.895 & 0.629 & 0.293 & 6/7 & 0 \\
+pi3 & 0.897 & 80.4 & 99.3 & 0.035 & 0.821 & 0.55 & 0.299 & 4/7 & 2 \\
+pi3x & 0.692 & 85.9 & 73.3 & 0.146 & 0.251 & 0.384 & 0.403 & 6/7 & 1 \\
+pi-long & 0.923 & 87.2 & 99.6 & 0.061 & 0.472 & 0.563 & 0.307 & 6/7 & 0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+\begin{table}
+\caption{How far each method scales, in frames}
+\label{tab:t2_scaling}
+\begin{tabular}{llrrrrr}
+\toprule
+ & mode & longest\_ok & shortest\_OOM & assets\_ok & assets\_OOM & assets\_not\_run \\
+method &  &  &  &  &  &  \\
+\midrule
+colmap/no\_gt & chunked / streaming & 803 & NaN & 6 & 0 & 1 \\
+vggt-long & chunked / streaming & 803 & NaN & 6 & 0 & 1 \\
+vggt-slam & chunked / streaming & 803 & NaN & 6 & 0 & 1 \\
+da3\_streaming & chunked / streaming & 803 & NaN & 6 & 0 & 1 \\
+pi3x & chunked / streaming & 803 & 1042 & 6 & 1 & 0 \\
+pi-long & chunked / streaming & 803 & NaN & 6 & 0 & 1 \\
+mpsfm & chunked / streaming & 99 & NaN & 3 & 0 & 4 \\
+vggt & one-shot & 522 & 566 & 4 & 3 & 0 \\
+pi3 & one-shot & 522 & 803 & 4 & 2 & 1 \\
+vggt-omega & one-shot & 99 & 522 & 3 & 4 & 0 \\
+da3 & one-shot & 99 & 522 & 3 & 4 & 0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+\begin{table}
+\caption{Asset difficulty, ordered by sequence length}
+\label{tab:t3_asset_difficulty}
+\begin{tabular}{lrrrlrlrlr}
+\toprule
+ & frames & methods scored & methods OOM & best AUC@30 & median AUC@30 & best rel. MAE & median rel. MAE & best F@0.25m & median F@0.25m \\
+asset &  &  &  &  &  &  &  &  &  \\
+\midrule
+glass\_house2 & 97 & 11 & 0 & colmap/no\_gt (0.979) & 0.894 & da3 (0.0433) & 0.107 & pi3 (0.495) & 0.382 \\
+old\_house & 99 & 11 & 0 & colmap/no\_gt (0.999) & 0.936 & vggt-omega (0.0215) & 0.051 & da3 (0.658) & 0.593 \\
+unfinished\_build & 99 & 11 & 0 & mpsfm (1) & 0.865 & da3 (0.0158) & 0.0578 & da3 (0.848) & 0.678 \\
+crane & 522 & 8 & 2 & da3\_streaming (0.246) & 0.0576 & da3\_streaming (0.716) & 0.855 & da3\_streaming (0.0403) & 0.0166 \\
+bridge & 566 & 6 & 3 & da3\_streaming (0.881) & 0.474 & da3\_streaming (0.0799) & 0.478 & da3\_streaming (0.413) & 0.0719 \\
+ship & 803 & 6 & 4 & colmap/no\_gt (0.982) & 0.755 & da3\_streaming (0.0705) & 0.209 & colmap/no\_gt (0.386) & 0.11 \\
+office2 & 1042 & 0 & 5 & vggt-slam (0.0427) & 0.0384 & vggt-long (0.411) & 0.5 & vggt-long (0.194) & 0.116 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+\begin{table}
+\caption{How much each axis of scene variation costs, relative to its reference level}
+\label{tab:t4_axis_sensitivity}
+\begin{tabular}{llrrll}
+\toprule
+ &  & median worst-level cost \% & mean cost at worst level \% & worst level & most-affected method \\
+axis & metric &  &  &  &  \\
+\midrule
+\multirow[t]{3}{*}{trajectory} & pose · AUC@30 & 3.3 & 7.2 & trendspek & vggt-slam (+37\%) \\
+ & depth · Relative MAE & 82.9 & 68.2 & trendspek & vggt-slam (+183\%) \\
+ & cloud · F-score @0.25m & 5.9 & 4.4 & trendspek & pi3x (+49\%) \\
+\cline{1-6}
+\multirow[t]{3}{*}{illumination} & pose · AUC@30 & 5.3 & 10.1 & sunrise & vggt (+33\%) \\
+ & depth · Relative MAE & 46.4 & 47.4 & sunrise & vggt-long (+107\%) \\
+ & cloud · F-score @0.25m & 5.4 & 1.5 & sunrise & vggt (+37\%) \\
+\cline{1-6}
+\multirow[t]{3}{*}{soiling} & pose · AUC@30 & 0.1 & 4.5 & high & mpsfm (+58\%) \\
+ & depth · Relative MAE & 1.9 & 7.6 & high & mpsfm (+97\%) \\
+ & cloud · F-score @0.25m & 0 & 0.6 & medium & mpsfm (+64\%) \\
+\cline{1-6}
+\multirow[t]{3}{*}{reflectivity} & pose · AUC@30 & 1.5 & 12.5 & 1.0 & mpsfm (+74\%) \\
+ & depth · Relative MAE & 2.9 & 28.2 & 1.0 & mpsfm (+184\%) \\
+ & cloud · F-score @0.25m & 5.8 & 11.5 & 1.0 & mpsfm (+78\%) \\
+\cline{1-6}
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+\begin{table}
+\caption{Worst level on each appearance axis, and what it costs in pose AUC@30}
+\label{tab:t5_robustness}
+\begin{tabular}{llll}
+\toprule
+ & illumination worst & soiling worst & reflectivity worst \\
+method &  &  &  \\
+\midrule
+colmap/no\_gt & overcast (−5\%) & verylow (−0\%) & 0.25 (−0\%) \\
+mpsfm & sunrise (−29\%) & high (−58\%) & 1.0 (−74\%) \\
+vggt & sunrise (−33\%) & verylow (−0\%) & 1.0 (−19\%) \\
+vggt-long & sunrise (−21\%) & low (−0\%) & 1.0 (−14\%) \\
+vggt-slam & sunrise (−17\%) & verylow (−0\%) & 1.0 (−24\%) \\
+vggt-omega & sunrise (−2\%) & medium (−0\%) & 0.5 (−1\%) \\
+da3 & sunrise (−2\%) & verylow (−0\%) & 1.0 (−1\%) \\
+da3\_streaming & sunrise (−1\%) & high (−0\%) & 0.5 (−2\%) \\
+pi3 & sunrise (−2\%) & medium (−0\%) & 1.0 (−0\%) \\
+pi3x & night (−8\%) & medium (−1\%) & 1.0 (−4\%) \\
+pi-long & night (−2\%) & low (−0\%) & 0.75 (−0\%) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+\begin{table}
+\caption{Share of each sequence's frames a method is actually scored on}
+\label{tab:t6_frame_registration}
+\begin{tabular}{lrrrr}
+\toprule
+ & median reg. rate & mean & min & \% of runs below 90\% \\
+method &  &  &  &  \\
+\midrule
+colmap/no\_gt & 0.96 & 0.831 & 0.312 & 45.5 \\
+mpsfm & 1 & 0.999 & 0.99 & 0 \\
+vggt & 1 & 1 & 1 & 0 \\
+vggt-long & 1 & 1 & 1 & 0 \\
+vggt-slam & 0.959 & 0.912 & 0.552 & 32.3 \\
+vggt-omega & 1 & 1 & 1 & 0 \\
+da3 & 1 & 0.996 & 0.38 & 0.6 \\
+da3\_streaming & 1 & 1 & 1 & 0 \\
+pi3 & 1 & 1 & 1 & 0 \\
+pi3x & 1 & 1 & 1 & 0 \\
+pi-long & 1 & 1 & 1 & 0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+\begin{table}
+\caption{How much of the benchmark grid is filled in}
+\label{tab:t7_completion}
+\begin{tabular}{lrrrrr}
+\toprule
+ & scored & OOM & not\_run & total & pct\_scored \\
+category &  &  &  &  &  \\
+\midrule
+pose & 2312 & 864 & 872 & 4048 & 57.1 \\
+depth & 2299 & 880 & 869 & 4048 & 56.8 \\
+cloud & 2312 & 880 & 856 & 4048 & 57.1 \\
+\bottomrule
+\end{tabular}
+\end{table}

@@ -55,14 +55,14 @@ class EvalCase:
 
     @property
     def label(self) -> dict[str, str]:
-        """The index columns identifying this case in a results table."""
+        """The index columns identifying this case in a results table -- always all of them
+        (blank for whichever axis this variant doesn't use), so every metric's table gets the
+        same column order regardless of which assets/methods happened to touch it first, and a
+        blank cell and a genuinely-absent one are never ambiguous (see `runner.case_key`)."""
         v = self.variant
-        row = {"Asset": self.dataset.root.name, "Method": self.method, "Traj": v.traj or ""}
-        for name, val in (("Illumination", v.illumination), ("Soil", v.soil),
-                          ("Reflectivity", v.reflectivity)):
-            if val is not None:
-                row[name] = val
-        return row
+        return {"Asset": self.dataset.root.name, "Method": self.method, "Traj": v.traj or "",
+                "Illumination": v.illumination or "", "Soil": v.soil or "",
+                "Reflectivity": v.reflectivity or ""}
 
     # --- frames ---------------------------------------------------------------------------
 

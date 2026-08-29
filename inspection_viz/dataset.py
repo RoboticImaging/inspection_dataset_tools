@@ -1,3 +1,9 @@
+# Postponed annotation evaluation (PEP 563): lets `str | None` etc. below run on Python < 3.10
+# (e.g. this repo's pixel-perfect-sfm-eigen-src baseline image, Ubuntu 20.04's default Python 3.8)
+# without needing `typing.Optional`/`typing.Union` -- annotations are stored as strings instead of
+# evaluated at class-definition time, so `type.__or__` (added in 3.10) is never actually called.
+from __future__ import annotations
+
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -136,6 +142,7 @@ class AssetDataset:
             (d / "dense" / "fused.ply", b) for d, b in self._colmap_dirs
             if (d / "dense" / "fused.ply").is_file()
         ]
+        self._pred_ooms = _walk_template(self.root, layout.pred_oom_file, files=True)
         mesh_pat = segment_patterns(layout.mesh_file)[0]
         self.meshes = {
             m.groupdict().get("kind", f.stem): f
@@ -207,6 +214,11 @@ class AssetDataset:
     def cloud_path(self, variant: Variant, method: str) -> Path | None:
         """The fused .ply a baseline wrote for this variant, or None if it didn't write one."""
         return self._match(self._pred_clouds, {**variant.as_dict(), "method": method})
+
+    def oom_path(self, variant: Variant, method: str) -> Path | None:
+        """The marker a baseline's run left after hitting a GPU OOM on this variant, or None if
+        it never did (or the marker was cleared by a later successful run)."""
+        return self._match(self._pred_ooms, {**variant.as_dict(), "method": method})
 
     def sequence(self, variant: Variant, source: str = "gt") -> Sequence:
         """Frames for `variant`. `source` is "gt" or one of `self.methods`, selecting whether

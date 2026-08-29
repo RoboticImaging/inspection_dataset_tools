@@ -10,8 +10,8 @@ import pytest
 import trimesh
 
 from conftest import WH, make_asset, make_colmap, make_predictions, write_cam, write_depth_exr
-from inspection_eval import (Sim3, evaluate, frame_gaps, target_from_path, targets_from_paths,
-                             umeyama)
+from inspection_eval import (Sim3, Target, evaluate, frame_gaps, target_from_path,
+                             targets_from_paths, umeyama)
 from inspection_eval.case import EvalCase, match_size
 from inspection_eval.metrics import REGISTRY, get
 from inspection_eval.metrics.cloud import CloudOptions
@@ -390,6 +390,132 @@ def test_table_renders_and_writes(tmp_path):
     assert {p.suffix for p in written} == {".csv", ".md", ".tex"}
 
 
+# --- labels always carry every column, and resuming a Reflectivity of 0.0 -----------------
+
+
+def test_label_always_has_every_label_column(tmp_path):
+    """Every column is present -- blank for whichever axis this variant doesn't use -- instead
+    of Illumination/Soil/Reflectivity only showing up once some case happens to need them, so a
+    metric's table has the same column order regardless of which assets/methods it covers."""
+    ds = case_asset(tmp_path)
+    soil_case = EvalCase(ds, "da3", VARIANT)
+    assert soil_case.label == {"Asset": "asset", "Method": "da3", "Traj": "trajA",
+                               "Illumination": "sunny", "Soil": "low", "Reflectivity": ""}
+
+    refl_case = EvalCase(ds, "da3", Variant("trajA", "sunny", None, "0.0"))
+    assert refl_case.label == {"Asset": "asset", "Method": "da3", "Traj": "trajA",
+                               "Illumination": "sunny", "Soil": "", "Reflectivity": "0.0"}
+
+
+def test_case_key_recognizes_a_resumed_reflectivity_of_zero(tmp_path):
+    """The bug this guards: `report._typed` turns a saved Reflectivity of "0.0" back into the
+    *falsy* float 0.0 on --resume, and `case_key` used to do `row.get(col, "") or ""`, which
+    collapsed that into the same key as a case with no reflectivity at all -- so --resume never
+    recognized an already-scored reflectivity=0.0 case and rescored (duplicated) it."""
+    from inspection_eval.runner import case_key
+
+    ds = case_asset(tmp_path)
+    live = EvalCase(ds, "da3", Variant("trajA", "sunny", None, "0.0")).label
+    resumed = {**live, "Reflectivity": 0.0}  # as read_table/_typed would produce it
+    assert case_key(live) == case_key(resumed)
+
+
+def test_evaluated_table_columns_lead_with_every_label_even_for_a_soil_only_asset(tmp_path):
+    ds = case_asset(tmp_path)  # soil-only fixture, never touches reflectivity
+    results = evaluate([target_from_path(ds.root / "predictions" / "da3")], ["pose"])
+    assert results.tables["pose"].columns[:6] == \
+        ["Asset", "Method", "Traj", "Illumination", "Soil", "Reflectivity"]
+
+
+# --- GPU OOM: columns survive even when nothing was ever scored ---------------------------
+#
+# A metric's columns are normally learned from the keys a real row returns (see report.py); an
+# OOM case never calls `fn`, so a run where *every* case is OOM would otherwise never learn its
+# metrics' columns at all. `_columns` (declared alongside `fn` in each metric module) is a pure
+# function of options, so the runner can seed a fully-"OOM" row without ever touching data.
+
+
+def test_cloud_columns_match_what_the_metric_actually_returns(tmp_path):
+    ds = case_asset(tmp_path, cloud=True)
+    for kind in ("accuracy", "completeness"):
+        write_gt_mesh(ds.root, kind)
+    ds = AssetDataset(ds.root, ds.layout)  # re-scan, the meshes are new
+
+    o = CloudOptions(gt_points=20_000, thresholds=(0.1, 0.25))
+    case = EvalCase(ds, "da3", VARIANT, align_mode="none", cache_dir=tmp_path / "cache")
+    row = get("cloud").fn(case, o)
+    assert set(row.keys()) == set(get("cloud").columns(o))
+
+
+def test_depth_columns_match_what_the_metric_actually_returns(tmp_path):
+    ds = case_asset(tmp_path)
+    o = DepthOptions()
+    row = get("depth").fn(EvalCase(ds, "da3", VARIANT), o)
+    assert set(row.keys()) == set(get("depth").columns(o))
+
+
+def test_pose_columns_match_what_the_metric_actually_returns(tmp_path):
+    ds = case_asset(tmp_path, n_frames=5)
+    o = PoseOptions()
+    row = get("pose").fn(EvalCase(ds, "da3", VARIANT), o)
+    assert set(row.keys()) == set(get("pose").columns(o))
+
+
+def oom_target(tmp_path: Path, method="da3") -> Target:
+    """An asset whose only variant never produced a single prediction -- just the GPU-OOM marker
+    a baseline leaves behind (`baselines.common.writer.write_oom`) -- so `evaluate` has to report
+    it as OOM without ever calling a metric's `fn`, the corner this whole section guards."""
+    from baselines.common.writer import oom_path, write_oom
+
+    root = make_asset(tmp_path / "asset", trajs=("trajA",), illums=("sunny",), soils=("low",),
+                      mesh_kinds=("accuracy", "completeness"))
+    layout = Layout()
+    write_oom(oom_path(root, layout, method, BINDS), "CUDA out of memory")
+    return Target(AssetDataset(root, layout), method)
+
+
+def test_an_all_oom_run_still_gets_every_column_of_the_cloud_metric(tmp_path):
+    results = evaluate([oom_target(tmp_path)], ["cloud"])
+    table = results.tables["cloud"]
+    expected = get("cloud").columns(CloudOptions())
+
+    assert len(table) == 1
+    assert set(expected) <= set(table.columns)
+    assert all(table.rows[0][c] == "OOM" for c in expected)
+
+
+def test_an_all_oom_run_still_gets_every_column_of_the_depth_metric(tmp_path):
+    results = evaluate([oom_target(tmp_path)], ["depth"])
+    table = results.tables["depth"]
+    expected = get("depth").columns(DepthOptions())
+
+    assert len(table) == 1
+    assert set(expected) <= set(table.columns)
+    assert all(table.rows[0][c] == "OOM" for c in expected)
+
+
+def test_an_all_oom_run_still_gets_every_column_of_the_pose_metric(tmp_path):
+    results = evaluate([oom_target(tmp_path)], ["pose"])
+    table = results.tables["pose"]
+    expected = get("pose").columns(PoseOptions())
+
+    assert len(table) == 1
+    assert set(expected) <= set(table.columns)
+    assert all(table.rows[0][c] == "OOM" for c in expected)
+
+
+def test_an_all_oom_runs_written_csv_keeps_every_column_too(tmp_path):
+    from inspection_eval.report import read_tables
+
+    results = evaluate([oom_target(tmp_path)], ["depth"])
+    results.write(tmp_path / "out", ("csv",))
+
+    back = read_tables(tmp_path / "out")["depth"]
+    expected = get("depth").columns(DepthOptions())
+    assert set(expected) <= set(back.columns)
+    assert all(back.rows[0][c] == "OOM" for c in expected)
+
+
 # --- holes in the data --------------------------------------------------------------------
 #
 # Every metric aggregates over data that is allowed to be incomplete, and the failure mode these
@@ -611,6 +737,61 @@ def test_evaluate_hands_over_the_results_after_every_case(tmp_path):
     assert len(results.tables["pose"]) == 2
 
 
+# --- --workers -------------------------------------------------------------------------------
+
+
+def test_score_case_matches_calling_the_metric_directly(tmp_path):
+    from inspection_eval.runner import _score_case
+
+    ds = case_asset(tmp_path)
+    target = target_from_path(ds.root / "predictions" / "da3")
+    result = _score_case(target, VARIANT, "sim3", ["pose"], {"pose": PoseOptions()})
+
+    direct = get("pose").fn(EvalCase(ds, "da3", VARIANT), PoseOptions())
+    assert result.rows == {"pose": direct}
+    assert result.skips == []
+
+
+def test_evaluate_with_workers_matches_the_serial_result(tmp_path):
+    """--workers changes how the work is distributed, never what gets scored or the order the
+    results land in. Compared cell by cell, not with plain `==`, since a pose metric can
+    legitimately return nan (e.g. no baseline pair to compare) and nan != nan."""
+    targets = targets_from_paths([multi_variant_asset(tmp_path)])
+    serial = evaluate(targets, ["pose", "depth"])
+    parallel = evaluate(targets, ["pose", "depth"], workers=2)
+
+    assert parallel.tables.keys() == serial.tables.keys()
+    for name in serial.tables:
+        want, got = serial.tables[name].rows, parallel.tables[name].rows
+        assert len(want) == len(got)
+        for w, g in zip(want, got):
+            assert w.keys() == g.keys()
+            for key in w:
+                if isinstance(w[key], float) and np.isnan(w[key]):
+                    assert isinstance(g[key], float) and np.isnan(g[key])
+                else:
+                    assert w[key] == g[key]
+
+
+def test_workers_can_score_a_metric_registered_at_runtime(tmp_path):
+    """`workers` forks its pool, so a worker inherits REGISTRY exactly as it stands when the
+    pool starts -- including a metric registered locally, here, by this test -- rather than
+    re-importing the metrics package fresh the way a spawned worker would have to."""
+    from inspection_eval.metrics import REGISTRY, register
+
+    @register("runtime_metric")
+    def runtime_metric(case, options):
+        return {"Illum": case.variant.illumination}
+
+    try:
+        results = evaluate(targets_from_paths([multi_variant_asset(tmp_path)]),
+                           ["runtime_metric"], workers=2)
+    finally:
+        REGISTRY.pop("runtime_metric")
+
+    assert sorted(r["Illum"] for r in results.tables["runtime_metric"].rows) == ["night", "sunny"]
+
+
 def test_progress_bar_counts_and_fills():
     import eval as eval_cli
 
@@ -716,6 +897,20 @@ def test_eval_cli_no_stream_writes_only_at_the_end(tmp_path):
     assert rc == 0
     assert seen == [[], []]  # nothing on disk while the run is going
     assert len(list(out.rglob("spy_end.csv"))) == 1
+
+
+def test_eval_cli_workers_flag_runs_end_to_end(tmp_path):
+    """A real process-pool run through the CLI, not just `evaluate()` called in-process."""
+    import csv
+
+    import eval as eval_cli
+
+    rc = eval_cli.main([str(multi_variant_asset(tmp_path)), "--out", str(tmp_path / "out"),
+                        "--no-timestamp", "--metrics", "pose", "--workers", "2", "-q"])
+
+    assert rc == 0
+    rows = list(csv.DictReader((tmp_path / "out" / "pose.csv").open()))
+    assert len(rows) == 2
 
 
 # --- reusing a named folder ------------------------------------------------------------------
@@ -897,3 +1092,151 @@ def test_eval_cli_writes_into_a_named_timestamped_subfolder(tmp_path):
     assert len(subdirs) == 1
     assert subdirs[0].name.startswith("asset-da3-")
     assert (subdirs[0] / "depth.csv").is_file()
+
+
+# --- --resume with --save-hierarchical -------------------------------------------------------
+
+
+def test_overwrite_cant_be_combined_with_save_hierarchical(tmp_path):
+    import eval as eval_cli
+
+    with pytest.raises(SystemExit):
+        eval_cli.parse_args([str(tmp_path), "--overwrite", "--save-hierarchical"])
+
+
+def test_resume_can_be_combined_with_save_hierarchical():
+    import eval as eval_cli
+
+    args = eval_cli.parse_args(["preds", "--resume", "--save-hierarchical"])
+    assert args.resume and args.save_hierarchical
+
+
+def test_latest_metric_csvs_prefers_the_newest_timestamp(tmp_path):
+    import eval as eval_cli
+
+    method_dir = tmp_path / "asset" / "da3"
+    Table("pose").write(method_dir, ("csv",), suffix="_20260101-000000")
+    Table("pose").write(method_dir, ("csv",), suffix="_20260301-000000")
+    Table("pose").write(method_dir, ("csv",), suffix="_20260201-000000")
+
+    found = eval_cli._latest_metric_csvs(method_dir)
+    assert found["pose"].name == "pose_20260301-000000.csv"
+
+
+def test_latest_metric_csvs_prefers_a_bare_file_over_any_timestamp(tmp_path):
+    """A bare `<metric>.csv` is always current -- a --no-timestamp run overwrites it in place --
+    so it wins even against a lexicographically later timestamp."""
+    import eval as eval_cli
+
+    method_dir = tmp_path / "asset" / "da3"
+    Table("pose").write(method_dir, ("csv",), suffix="_20990101-000000")
+    Table("pose").write(method_dir, ("csv",))
+
+    found = eval_cli._latest_metric_csvs(method_dir)
+    assert found["pose"].name == "pose.csv"
+
+
+def test_latest_metric_csvs_is_empty_for_a_combo_never_evaluated(tmp_path):
+    import eval as eval_cli
+
+    assert eval_cli._latest_metric_csvs(tmp_path / "asset" / "nope") == {}
+
+
+def _write_pose_row(out_root: Path, asset: str, method: str, illumination: str, suffix: str):
+    table = Table("pose")
+    table.add({"Asset": asset, "Method": method, "Traj": "trajA", "Illumination": illumination,
+              "Soil": "low", "Reflectivity": "", "ATE RMSE (m)": 0.1})
+    table.write(out_root / asset / method, ("csv",), suffix=suffix)
+
+
+def test_start_from_hierarchical_merges_every_targets_combo(tmp_path):
+    import eval as eval_cli
+
+    ds = case_asset(tmp_path, n_frames=2)  # writes method "da3"
+    make_predictions(ds.root, ds.layout, "vggt", BINDS, n_frames=2)
+    targets = targets_from_paths([ds.root / "predictions"])
+
+    out_root = tmp_path / "out"
+    _write_pose_row(out_root, "asset", "da3", "sunny", "_20260101-000000")
+    _write_pose_row(out_root, "asset", "vggt", "sunny", "_20260201-000000")
+
+    resume, timestamp = eval_cli.start_from_hierarchical(out_root, targets)
+
+    assert timestamp == "20260201-000000"  # the latest found across every combo
+    assert {r["Method"] for r in resume["pose"].rows} == {"da3", "vggt"}
+
+
+def test_start_from_hierarchical_ignores_a_combo_outside_targets(tmp_path):
+    import eval as eval_cli
+
+    ds = case_asset(tmp_path, n_frames=2)  # writes method "da3" only
+    targets = targets_from_paths([ds.root / "predictions" / "da3"])
+
+    out_root = tmp_path / "out"
+    _write_pose_row(out_root, "asset", "da3", "sunny", "_20260101-000000")
+    _write_pose_row(out_root, "other_asset", "vggt", "sunny", "_20260901-000000")
+
+    resume, timestamp = eval_cli.start_from_hierarchical(out_root, targets)
+
+    assert timestamp == "20260101-000000"  # other_asset/vggt isn't part of this run's targets
+    assert {r["Asset"] for r in resume["pose"].rows} == {"asset"}
+
+
+def test_start_from_hierarchical_is_empty_on_a_fresh_run(tmp_path):
+    import eval as eval_cli
+
+    ds = case_asset(tmp_path, n_frames=2)
+    targets = targets_from_paths([ds.root / "predictions" / "da3"])
+
+    resume, timestamp = eval_cli.start_from_hierarchical(tmp_path / "out", targets)
+    assert resume == {} and timestamp is None
+
+
+def test_eval_cli_save_hierarchical_resume_continues_a_partial_combo(tmp_path):
+    """A combo cut off partway through picks up from its last completed case, and the resumed
+    run's files keep the same generation instead of starting a new timestamped copy."""
+    import csv
+
+    import eval as eval_cli
+
+    predictions = multi_variant_asset(tmp_path)
+    out = tmp_path / "out"
+    argv = [str(predictions), "--out", str(out), "--save-hierarchical",
+            "--metrics", "pose", "--format", "csv", "-q"]
+    combo = out / "asset" / "da3"
+
+    assert eval_cli.main(argv + ["--illumination", "sunny"]) == 0
+    [before] = combo.glob("pose_*.csv")
+    assert [r["Illumination"] for r in csv.DictReader(before.open())] == ["sunny"]
+
+    assert eval_cli.main(argv + ["--resume"]) == 0
+
+    [after] = combo.glob("pose_*.csv")
+    assert after == before  # same file: the resumed run reused its timestamp, not a new one
+    assert [r["Illumination"] for r in csv.DictReader(after.open())] == ["sunny", "night"]
+
+
+def test_eval_cli_save_hierarchical_resume_skips_a_fully_scored_combo(tmp_path):
+    """A combo that's already complete costs nothing on a resumed run: it's never rescored."""
+    import eval as eval_cli
+    from inspection_eval.metrics import REGISTRY, register
+
+    predictions = multi_variant_asset(tmp_path)
+    out = tmp_path / "out"
+    calls = []
+
+    @register("spy_hier")
+    def spy_hier(case, options):
+        calls.append(str(case.variant))
+        return {"Case": len(calls)}
+
+    try:
+        argv = [str(predictions), "--out", str(out), "--save-hierarchical",
+                "--metrics", "spy_hier", "--format", "csv", "-q"]
+        assert eval_cli.main(argv) == 0
+        assert len(calls) == 2  # both illuminations scored
+
+        assert eval_cli.main(argv + ["--resume"]) == 0
+        assert len(calls) == 2  # nothing rescored: the complete combo was skipped outright
+    finally:
+        REGISTRY.pop("spy_hier")

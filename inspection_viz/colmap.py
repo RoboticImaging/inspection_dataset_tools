@@ -20,6 +20,12 @@ pycolmap is only imported inside `Reconstruction.load`, so it stays an optional 
 anyone who never points these tools at a colmap prediction folder.
 """
 
+# Postponed annotation evaluation (PEP 563): lets `Camera | None` etc. below run on Python < 3.10
+# (e.g. this repo's pixel-perfect-sfm-eigen-src baseline image, Ubuntu 20.04's default Python 3.8)
+# without needing `typing.Optional`/`typing.Union` -- annotations are stored as strings instead of
+# evaluated at class-definition time, so `type.__or__` (added in 3.10) is never actually called.
+from __future__ import annotations
+
 import re
 from dataclasses import dataclass
 from functools import lru_cache

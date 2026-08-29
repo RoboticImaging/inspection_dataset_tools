@@ -1,0 +1,19 @@
+# Data config: which asset, which of its sequences, which frames. Reusable by every baseline —
+# pair it with a baseline config (e.g. ../da3.yaml) on the command line:
+#
+#   python run_sequence.py --data ../configs/data/office_dynamic.yaml --model ../configs/da3.yaml
+#
+# An axis takes one value, a list of values, or null / no key at all = every value this asset has
+# on that axis, discovered from the asset itself. So dropping the three axis lines below runs
+# every sequence of the asset; `illumination: [sunny, overcast]` runs a subset.
+
+asset: /home/shared/eccv_2026_data/office2/   # the asset folder, e.g. .../glass_house
+
+trajectory: null
+illumination: sunrise
+soil: null
+reflectivity: null          # or `reflectivity:`, whichever axis this asset varies
+
+frame_start: 0
+frame_end: null               # exclusive; null = to the end
+frame_stride: 1

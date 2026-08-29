@@ -27,6 +27,30 @@ baselines/
     run_sequence.py     #   the Baseline subclass + its own entry point
 ```
 
+### Registered baselines
+
+| name | what it runs |
+|---|---|
+| `da3` | Depth Anything 3, one joint inference call per sequence |
+| `da3_streaming` | DA3-Streaming, driven through its own chunked/loop-closed CLI |
+| `vggt` | Plain feed-forward VGGT, one joint inference call per sequence |
+| `vggt-omega` | Plain feed-forward VGGT-Omega, one joint inference call per sequence |
+| `pi3` | Plain feed-forward Pi3, one joint inference call per sequence |
+| `pi3x` | Pi3X, driven through its own chunked VO pipeline |
+| `vggt-slam` | VGGT-SLAM, driven through its own submap/loop-closure pipeline |
+| `vggt-long` | VGGT-Long, driven through its own chunked/loop-closed CLI |
+| `mpsfm` | MP-SfM, driven through its own classical incremental-SfM CLI |
+| `pi-long` | Pi-Long, driven through its own chunked/loop-closed CLI |
+| `colmap` | Classical COLMAP SfM + MVS, driven through its own CLI |
+| `glomap` | GLOMAP global SfM + classical MVS, driven through the `colmap` CLI's own `global_mapper` command |
+| `pixel-perfect-sfm` | Classical COLMAP SfM + dense-feature keypoint/bundle refinement |
+| `vidmap` | Video-aware SfM frontend + COLMAP-derived global mapper, driven through its own CLI |
+
+`baselines/registry.py` is the source of truth — the registry key doesn't always match the
+baseline's directory name or image tag (e.g. `da3` lives in `baselines/depth_anything_3/`;
+`da3_streaming`'s image is `inspection-baselines/da3-streaming`, hyphen not underscore). Each
+baseline's own `run_container.sh`/`build_container.sh` resolve their own image tag.
+
 ## Configs
 
 A run takes two files, so neither has to be rewritten to change the other half:
@@ -46,6 +70,11 @@ Rules that hold for every baseline:
 - Selected sequences run one after another through a single loaded model.
 - A sequence that already has predictions is skipped unless `output.overwrite: true` — re-run the
   same command to resume an interrupted run or to extend it to more variants.
+- Every runner's `--set section.path=value` (repeatable, e.g. `--set model.ka.strategy=basic`,
+  `--set output.overwrite=true`) patches one field of the loaded data/model/output config without
+  writing a new yaml file — the same mechanism `eval.py`'s own `--set metric.option=value` (see
+  `# Evaluation` below) uses, shared by every baseline runner via
+  `baselines.common.config.add_config_args`.
 - After each run, `<asset>/predictions/<method>/config.yaml` records both configs, the timestamp
   and the variants written. It is rewritten per run: it describes what is on disk now.
 - Both halves may still be given as a single file (`dataset:` + `model:` + `output:`) passed as
@@ -174,3 +203,28 @@ venv/bin/python eval.py /data/old_house                     # same: an asset roo
   `--align none` for runs conditioned on gt poses.
 - Useful flags: `--metrics pose,depth`, `--traj/--illumination/--soil/--reflectivity` to score a
   single variant, `--set metric.option=value`, `--list-metrics`, `--allow-missing-frames`.
+
+# Analysis tools
+
+Root-level scripts that read (never write) prediction/eval output — none needs a baseline's own
+container, just the host venv.
+
+- **`check_completion_status.py`** — scans an `eccv_2026_data`-style root and reports, per
+  registered baseline and asset, whether every sequence variant has a completed prediction
+  (judged by the fused cloud existing) as `COMPLETE`/`PARTIAL`/`NOT STARTED`/`OOM`, colorized.
+  ```bash
+  python check_completion_status.py [--eccv-root PATH] [--baseline NAME ...] [--example] [--verbose]
+  ```
+- **`collate_results.py`** — collates every csv under an `eval.py --save-hierarchical` output tree
+  into one combined csv per metric category (cloud/depth/pose), for further analysis in
+  pandas/a spreadsheet — raw input, not a human-facing summary.
+- **`latex_results_table.py`** — prints ready-to-paste LaTeX rows for per-scene results tables from
+  the same `--save-hierarchical` tree.
+  ```bash
+  python latex_results_table.py RESULTS_ROOT vggt-omega da3 pi-long
+  ```
+- **`plot_variant_metrics.py`** — plots pose/cloud/depth metrics against the soiling/reflectivity/
+  illumination axes `eval.py`'s variants sweep, comparing every method on the same axes.
+  ```bash
+  python plot_variant_metrics.py glass_house2 --out plots/glass_house2
+  ```

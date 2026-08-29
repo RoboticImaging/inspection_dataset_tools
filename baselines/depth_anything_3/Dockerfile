@@ -30,10 +30,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && python3.11 -m venv /opt/venv
 
-# depth-anything-3's own deps (torch/xformers first — the slow, rarely-changing layers)
+# depth-anything-3's own deps (torch/xformers first — the slow, rarely-changing layers).
+# Pinned to the cu128 wheel index rather than plain PyPI: an unpinned `pip install torch` now
+# resolves to a build whose default Linux wheel bundles CUDA 13.0 (via a `cuda-toolkit`
+# dependency) instead of the CUDA 12.x this repo's other Dockerfiles target, which needs a newer
+# driver than most hosts have and fails at import with "The NVIDIA driver on your system is too
+# old". cu128 matches what `nvidia-smi` reports as the driver's max supported CUDA version here;
+# bump only after confirming the host driver supports it.
 COPY depth-anything-3/requirements.txt /tmp/da3-requirements.txt
 RUN pip install --no-cache-dir -U pip && \
-    pip install --no-cache-dir "torch>=2" torchvision xformers && \
+    pip install --no-cache-dir "torch>=2" torchvision xformers \
+        --index-url https://download.pytorch.org/whl/cu128 && \
     pip install --no-cache-dir -r /tmp/da3-requirements.txt
 
 # Copied to /opt (not /workspace) and installed off that copy, so the import works no matter

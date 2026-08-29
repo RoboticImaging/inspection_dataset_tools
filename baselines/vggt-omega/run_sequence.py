@@ -221,14 +221,14 @@ class VGGTOmega(Baseline):
             cols = (cols * 255).clip(0, 255).astype(np.uint8)
             cloud_mask = np.isfinite(world_pts).all(axis=1)
 
-            if out.spec.min_confidence is not None:
+            if out.spec.cloud_confidence_percentile is not None:
                 # A percentile (0-100) of lowest-confidence points to drop from the cloud, not an
                 # absolute cutoff -- raw confidence isn't comparable across runs/models the way an
                 # absolute probability is. This only ever filters the cloud, not per-pixel depth
-                # (unlike SequenceOutput.write_frame's own min_confidence, which is an absolute
-                # cutoff on depth -- not used here, so depth is never nan-masked by confidence).
+                # (unlike SequenceOutput.write_frame's own min_confidence, an absolute cutoff on
+                # depth -- deliberately never set here, so depth is never nan-masked by confidence).
                 confs = predictions["depth_conf"].reshape(-1)
-                conf_thresh_absolute = np.percentile(confs, out.spec.min_confidence)
+                conf_thresh_absolute = np.percentile(confs, out.spec.cloud_confidence_percentile)
                 cloud_mask &= (confs >= conf_thresh_absolute) & (confs >= 1e-5)
 
         for j, f in enumerate(frames):

@@ -57,7 +57,10 @@ class Table:
         lines += [r"\label{tab:" + self.name + "}", r"\end{table}"]
         return "\n".join(lines)
 
-    def write(self, out_dir: Path, formats=("csv", "md")) -> list[Path]:
+    def write(self, out_dir: Path, formats=("csv", "md"), suffix: str = "") -> list[Path]:
+        """`out_dir/<name><suffix>.<format>` for each of `formats`. `suffix` exists for callers
+        that put a timestamp in the filename instead of (or as well as) the folder path -- see
+        `split_by`, used for `eval.py --save-hierarchical`."""
         out_dir = Path(out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
         render = {"csv": self.to_csv, "md": self.to_markdown,
@@ -66,10 +69,22 @@ class Table:
         for fmt in formats:
             if fmt not in render:
                 raise ValueError(f"unknown format {fmt!r}; known: {FORMATS}")
-            path = out_dir / f"{self.name}.{fmt}"
+            path = out_dir / f"{self.name}{suffix}.{fmt}"
             path.write_text(render[fmt]() + "\n")
             written.append(path)
         return written
+
+
+def split_by(table: Table, keys=("Asset", "Method")) -> dict[tuple, Table]:
+    """`table`'s rows, grouped into one same-named `Table` per distinct combination of `keys` --
+    e.g. one table per (Asset, Method) instead of one table mixing every combo's rows together.
+    Each sub-table gets its own `columns`, built the same incremental way `add` always does, so a
+    combo that didn't use some column (a metric skipped for it, say) doesn't carry a blank one."""
+    groups: dict[tuple, Table] = {}
+    for row in table.rows:
+        key = tuple(row.get(k, "") for k in keys)
+        groups.setdefault(key, Table(table.name)).add(row)
+    return groups
 
 
 def read_table(path: Path) -> Table:

@@ -10,6 +10,13 @@ fail everywhere — the price is that a typo in the module path only surfaces wh
 runs.
 """
 
+# Postponed annotation evaluation (PEP 563): lets `list[str]` etc. below run on Python < 3.9
+# (e.g. this repo's pixel-perfect-sfm-eigen-src baseline image, Ubuntu 20.04's default Python 3.8)
+# without needing `typing.List` -- annotations are stored as strings instead of evaluated at
+# function-definition time, so subscripting the bare `list` builtin (added in 3.9, PEP 585) is
+# never actually attempted.
+from __future__ import annotations
+
 import importlib
 
 BASELINES = {
@@ -23,6 +30,10 @@ BASELINES = {
     "vggt-long": "baselines.VGGT-Long.run_sequence:VGGTLong",
     "mpsfm": "baselines.mpsfm.run_sequence:MPSfM",
     "pi-long": "baselines.Pi-Long.run_sequence:PiLong",
+    "colmap": "baselines.colmap.run_sequence:COLMAP",
+    "glomap": "baselines.glomap.run_sequence:GLOMAP",
+    "pixel-perfect-sfm": "baselines.pixel-perfect-sfm.run_sequence:PixelPerfectSfM",
+    "vidmap": "baselines.vidmap.run_sequence:VidMap",
 }
 
 

@@ -5,3 +5,5 @@ __pycache__/
 .cache/
 eval_results/
 baselines/configs/*/generated/
+analysis/figures/*
+analysis/figures_web/*

@@ -9,7 +9,8 @@ from inspection_viz.config import Layout
 from inspection_viz.dataset import Variant
 from inspection_viz import io
 from baselines.common.writer import (
-    cloud_path, frame_stem, output_dirs, write_cam, write_cloud, write_depth,
+    _atomic_write, _write_verified, cloud_path, frame_stem, output_dirs, write_cam, write_cloud,
+    write_depth,
 )
 
 
@@ -80,3 +81,96 @@ def test_cam_round_trips_through_camera_from_blender(tmp_path):
     assert np.allclose(cam.position, t, atol=1e-6)
     assert np.isclose(cam.K[0, 0], fx, atol=1e-3)
     assert cam.far == 100.0
+
+
+# --- atomic / verified writes (a process killed mid-write, or a storage hiccup, must never ------
+# --- leave a truncated file at the real path -- see baselines.common.writer._atomic_write) ------
+
+
+def test_atomic_write_leaves_the_old_file_untouched_if_write_fn_raises(tmp_path):
+    path = tmp_path / "out.bin"
+    path.write_bytes(b"old contents")
+
+    def bad_write(tmp):
+        tmp.write_bytes(b"partial")
+        raise RuntimeError("simulated crash mid-write")
+
+    with pytest.raises(RuntimeError):
+        _atomic_write(path, bad_write)
+
+    assert path.read_bytes() == b"old contents"  # never replaced with the partial write
+    assert list(path.parent.iterdir()) == [path]  # no stray temp file left behind either
+
+
+def test_write_verified_retries_until_verify_passes(tmp_path):
+    path = tmp_path / "out.bin"
+    verify_calls = []
+
+    def write_fn(tmp):
+        tmp.write_bytes(b"data")
+
+    def verify_fn(written):
+        verify_calls.append(written)
+        if len(verify_calls) < 2:
+            raise ValueError("not yet")
+
+    _write_verified(path, write_fn, verify_fn, attempts=3)
+
+    assert len(verify_calls) == 2
+    assert path.read_bytes() == b"data"
+
+
+def test_write_verified_gives_up_and_cleans_up_after_exhausting_attempts(tmp_path):
+    path = tmp_path / "out.bin"
+    write_calls = []
+
+    def write_fn(tmp):
+        write_calls.append(tmp)
+        tmp.write_bytes(b"data")
+
+    def always_bad_verify(written):
+        raise ValueError("never valid")
+
+    with pytest.raises(IOError, match="didn't read back valid"):
+        _write_verified(path, write_fn, always_bad_verify, attempts=3)
+
+    assert len(write_calls) == 3  # tried the full write, not just a re-check, each attempt
+    assert not path.exists()  # a known-bad file must not be left looking like valid output
+
+
+def test_write_depth_retries_after_a_verification_failure(tmp_path, monkeypatch):
+    real_read_depth = io.read_depth
+    calls = []
+
+    def flaky_read_depth(path):
+        calls.append(path)
+        if len(calls) == 1:
+            raise IOError("simulated corrupt read")
+        return real_read_depth(path)
+
+    monkeypatch.setattr(io, "read_depth", flaky_read_depth)
+
+    depth = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+    path = tmp_path / "depths" / "00000000.exr"
+    write_depth(path, depth, attempts=3)
+
+    assert len(calls) == 2  # failed verifying once, then wrote+verified again and it stuck
+    assert np.allclose(io.read_depth(path), depth)
+
+
+def test_write_depth_raises_and_cleans_up_after_persistent_corruption(tmp_path, monkeypatch):
+    monkeypatch.setattr(io, "read_depth", lambda path: (_ for _ in ()).throw(IOError("corrupt")))
+
+    depth = np.zeros((2, 2), dtype=np.float32)
+    path = tmp_path / "depths" / "00000000.exr"
+    with pytest.raises(IOError, match="didn't read back valid"):
+        write_depth(path, depth, attempts=3)
+
+    assert not path.exists()
+
+
+def test_write_depth_verify_false_skips_the_readback(tmp_path):
+    depth = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+    path = tmp_path / "depths" / "00000000.exr"
+    write_depth(path, depth, verify=False)  # must not raise, and must still write a valid file
+    assert np.allclose(io.read_depth(path), depth)
