@@ -1,0 +1,126 @@
+# Baseline config for DetectorFreeSfM (zju3dv/DetectorFreeSfM, CVPR 2024 -- detector-free coarse
+# matching + a learned multi-view refinement matcher, on top of a modified COLMAP fork) + dense
+# MVS: its own knobs, nothing about which data to run on. Reusable across assets — pair it with a
+# data config from configs/data/:
+#
+#   python run_sequence.py --data ../configs/data/old_house.yaml --model ../configs/detector-free-sfm.yaml
+#
+# Every field has a default in run_sequence.py's dataclasses -- DetectorFreeSfM's own
+# hydra_configs/demo/dfsfm.yaml default unless a comment there says otherwise. `neuralsfm`/
+# `colmap_cfg` map onto that same hydra config's own `neuralsfm:`/`colmap_cfg:` blocks field for
+# field (a subset -- see run_sequence.py's own NeuralSfMConfig/ColmapCfgConfig docstrings for what
+# is deliberately fixed instead of exposed here); `patch_match`/`stereo_fusion`/`depth_source`
+# mirror ../configs/colmap.yaml's own identically-named groups exactly (same underlying
+# patch_match_stereo/stereo_fusion flags, chained on afterward since DetectorFreeSfM itself only
+# ever produces a sparse point cloud -- see `dense`'s own comment below).
+#
+# A copy of this, plus the data config and the variants that ran, is written to
+# <asset>/predictions/<method>/config.yaml after each run.
+
+model:
+  neuralsfm:
+    NEUSFM_coarse_matcher: loftr_official   # 'loftr_official' | 'aspanformer' | 'matchformer'
+    NEUSFM_coarse_match_type: coarse_only
+    NEUSFM_coarse_match_thr: 0.2
+    NEUSFM_coarse_match_round: null
+    NEUSFM_refinement_chunk_size: 2000      # lower on GPUs with <12GB VRAM (README's own tip)
+    NEUSFM_enable_post_optimization: true   # false -> no colmap_refined/ ever gets written, see
+                                             # run_sequence.py's run_dfsfm docstring
+    img_resize: 1200
+    img_pair_strategy: exhaustive
+    refine_iter_n_times: 2
+
+  colmap_cfg:
+    ImageReader_camera_mode: auto
+    ImageReader_single_camera: false
+    min_model_size: 3
+    no_refine_intrinsics: false
+    use_pba: false
+    n_threads: 16
+    reregistration:
+      abs_pose_max_error: 12
+      abs_pose_min_num_inliers: 30
+      abs_pose_min_inlier_ratio: 0.25
+      filter_max_reproj_error: 5
+
+  # Dense MVS chained onto DetectorFreeSfM's own sparse refined reconstruction, via the same
+  # modified `colmap` CLI binary this baseline's Dockerfile builds -- see run_sequence.py's own
+  # ModelConfig.dense docstring for why this is the LEAST validated part of this baseline (its
+  # patch_match/stereo_fusion defaults below are confirmed only against a CURRENT, vanilla colmap
+  # build, not this baseline's own much older forked one). Set to false if the fork's own dense
+  # commands don't cooperate -- every registered frame still gets a pose either way, just with
+  # all-NaN depth and the sparse refined cloud instead of a dense fused one.
+  dense: true
+
+  # This fork's own `colmap patch_match_stereo --help` (COLMAP 3.8, commit 03a3bc64) verbatim --
+  # NOT the same field list as ../configs/colmap.yaml's own patch_match block: this fork has no
+  # num_threads flag at all (gpu_index is the real per-invocation knob), and gained
+  # gpu_index/depth_min/depth_max/cache_size that vanilla colmap.yaml doesn't have. Defaults
+  # below are this fork's own --help defaults, not vanilla COLMAP's -- notably geom_consistency
+  # defaults true here (vanilla COLMAP: false) and sigma_spatial defaults -1/auto (vanilla: 5.0).
+  patch_match:
+    max_image_size: -1
+    gpu_index: "-1"
+    depth_min: -1
+    depth_max: -1
+    window_radius: 5
+    window_step: 1
+    sigma_spatial: -1
+    sigma_color: 0.2
+    num_samples: 15
+    ncc_sigma: 0.6
+    min_triangulation_angle: 1.0
+    incident_angle_sigma: 0.9
+    num_iterations: 5
+    geom_consistency: true
+    geom_consistency_regularizer: 0.3
+    geom_consistency_max_cost: 3.0
+    filter: true
+    filter_min_ncc: 0.1
+    filter_min_triangulation_angle: 3.0
+    filter_min_num_consistent: 2
+    filter_geom_consistency_max_cost: 1.0
+    cache_size: 32
+    allow_missing_files: false
+    write_consistency_graph: false
+
+  # This fork's own `colmap stereo_fusion --help` verbatim -- matches vanilla colmap.yaml's own
+  # field list except for one addition, num_threads (confirmed present here via --help).
+  stereo_fusion:
+    mask_path: null
+    num_threads: -1
+    max_image_size: -1
+    min_num_pixels: 5
+    max_num_pixels: 10000
+    max_traversal_depth: 100
+    max_reproj_error: 2.0
+    max_depth_error: 0.01
+    max_normal_error: 10.0
+    check_num_images: 50
+    cache_size: 32
+    use_cache: false
+
+  # "geometric" (this fork's own --input_type default too) -- NOT "photometric": patch_match's
+  # own geom_consistency defaults true above, which is what actually produces the .geometric.bin
+  # depth maps stereo_fusion (and run_sequence.py's own read_depth_map) then treat as
+  # authoritative.
+  depth_source: geometric      # "photometric" or "geometric"
+
+output:
+  # -> predictions/{method}/{illumination}/{depths,cam_params}/soil={soil},traj={traj}/
+  #    predictions/{method}/{illumination}/clouds/soil={soil},traj={traj}.ply
+  # (keyed by the full variant, so runs on different illumination/soil never overwrite each other)
+  #
+  # Unlike the feed-forward baselines: DetectorFreeSfM is classical SfM (+ dense MVS chained on
+  # afterward), not a depth model -- only frames it actually registered get written at all, and a
+  # registered frame patch_match_stereo never estimated a depth map for still falls back to
+  # all-NaN. Pose and cloud are fully written either way, but DetectorFreeSfM's own scale is left
+  # unrecovered (see run_sequence.py's module docstring) -- only rotation+translation are aligned
+  # to gt, the same accepted convention baselines/colmap and baselines/glomap use.
+  method: null                  # null = the baseline's registered name ("detector-free-sfm");
+                                 # set it to run two configurations of this baseline side by side
+  overwrite: false              # false = skip sequences that already have predictions
+  min_confidence: null          # DetectorFreeSfM produces no per-pixel confidence map -- must
+                                 # stay null
+  cloud: true                    # dense fused point cloud from stereo_fusion when model.dense is
+                                  # true, else DetectorFreeSfM's own sparse refined SfM points

@@ -31,3 +31,6 @@
 [submodule "vidmap"]
 	path = vidmap
 	url = git@github.com:cvg/vidmap.git
+[submodule "DetectorFreeSfM"]
+	path = DetectorFreeSfM
+	url = git@github.com:zju3dv/DetectorFreeSfM.git
