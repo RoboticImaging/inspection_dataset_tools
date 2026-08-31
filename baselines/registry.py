@@ -34,6 +34,7 @@ BASELINES = {
     "glomap": "baselines.glomap.run_sequence:GLOMAP",
     "pixel-perfect-sfm": "baselines.pixel-perfect-sfm.run_sequence:PixelPerfectSfM",
     "vidmap": "baselines.vidmap.run_sequence:VidMap",
+    "detector-free-sfm": "baselines.DetectorFreeSfM.run_sequence:DetectorFreeSfM",
 }
 
 
