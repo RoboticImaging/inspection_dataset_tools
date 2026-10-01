@@ -62,6 +62,7 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
+import os
 
 import numpy as np
 import pycolmap
@@ -415,6 +416,7 @@ def merge_submodels(sparse_dir: Path, merge_dir: Path) -> bool:
     every pairwise attempt fell into the "unrecognized output" case -- callers must check for
     `merge_dir.is_dir()` too, not just this return value.
     """
+    import os
     submodels = sorted((d for d in sparse_dir.iterdir() if d.is_dir() and d.name.isdigit()),
                        key=lambda d: int(d.name))
     if not submodels:
@@ -431,6 +433,7 @@ def merge_submodels(sparse_dir: Path, merge_dir: Path) -> bool:
     tmp_dir = merge_dir.parent / f"{merge_dir.name}_tmp"
     for next_model in submodels[1:]:
         shutil.rmtree(tmp_dir, ignore_errors=True)
+        tmp_dir.mkdir(parents=True, exist_ok=True)
         proc = subprocess.run(
             ["colmap", "model_merger",
              "--input_path1", str(base_dir),
@@ -438,6 +441,7 @@ def merge_submodels(sparse_dir: Path, merge_dir: Path) -> bool:
              "--output_path", str(tmp_dir)],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         log = proc.stdout
+        print(os.listdir(merge_dir.parent))
 
         if "=> Merge succeeded" in log:
             if merge_dir.exists():
