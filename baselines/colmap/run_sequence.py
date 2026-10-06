@@ -129,6 +129,8 @@ class PatchMatchConfig:
     running binary's own printed option dump (this session's own terminal log), not source-read
     -- ground truth for what colmap itself resolves these to at runtime."""
     max_image_size: int = 480
+    depth_min: float = 0
+    depth_max: float = 500
     window_radius: int = 5
     window_step: int = 1
     sigma_spatial: float = 5.0
