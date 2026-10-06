@@ -15,26 +15,24 @@ shaped helpers), and this file follows the same accepted convention: one rigid (
 transform, from whichever registered frame comes first in the sequence onto its own gt pose,
 fixes rotation+translation for the whole run but leaves scale as COLMAP produced it.
 
-Driven entirely through the `colmap` CLI (built from the `colmap` submodule -- see
-baselines/colmap/Dockerfile): feature_extractor -> exhaustive_matcher -> mapper (incremental SfM)
--> model_merger (stitching together any disconnected sub-models the incremental mapper produced)
--> image_undistorter/patch_match_stereo/stereo_fusion (dense MVS). pycolmap is used only
-afterward, to read the resulting reconstruction back (poses, intrinsics) -- the same split
-mpsfm's own run_sequence.py uses.
+Driven through the `colmap` CLI (built from the `colmap` submodule -- see
+baselines/colmap/Dockerfile). The sparse stage (feature extraction, matching and incremental SfM)
+is a single `colmap automatic_reconstructor --dense 0` call, like colmap_sparse_loop.sh; the rest
+is still driven stage by stage: model_merger (stitching together any disconnected sub-models the
+incremental mapper produced) -> image_undistorter/patch_match_stereo/stereo_fusion (dense MVS).
+pycolmap is used only afterward, to read the resulting reconstruction back (poses, intrinsics) --
+the same split mpsfm's own run_sequence.py uses.
 
-This drives the *lower-level* feature_extractor/exhaustive_matcher/mapper commands directly,
-not the `automatic_reconstructor` convenience wrapper a first version of this file used --
-automatic_reconstructor never exposes most of what those commands can actually tune (confirmed by
-reading controllers/automatic_reconstruction.cc: it only ever touches a handful of top-level
-fields -- type/num_threads/use_gpu/gpu_index plus its own --quality presets -- on the underlying
-SiftExtraction/FeatureMatching/TwoViewGeometry/Mapper options structs). Every `ModelConfig` field
-below exists because it is a real, individually-settable flag on one of these commands, confirmed
-directly against this exact `colmap` submodule checkout's source (struct default member
-initializers, or -- for patch_match_stereo/stereo_fusion -- the actual running binary's own
-printed option dump), not general COLMAP familiarity: an earlier, less careful assumption here
-(that image_undistorter always outputs a PINHOLE camera model) crashed this baseline's first real
-run, right after its ~2-minute dense stage had already finished, so every default in this file has
-been checked against the source rather than trusted from memory.
+The sparse stage used to drive feature_extractor/exhaustive_matcher/mapper directly, exposing
+every per-stage knob. automatic_reconstructor only exposes a handful of top-level options (see
+`AutomaticReconstructorConfig`); `data_type` and `quality` decide everything else about feature
+extraction, matching and mapping. The dense stage's `PatchMatchConfig`/`StereoFusionConfig` below
+are unchanged: every field there exists because it is a real, individually-settable flag on
+patch_match_stereo/stereo_fusion, confirmed against the actual running binary's own printed
+option dump. An earlier, less careful assumption here (that image_undistorter always outputs a
+PINHOLE camera model) crashed this baseline's first real run, right after its ~2-minute dense
+stage had already finished, so every default in this file has been checked against the source
+rather than trusted from memory.
 
 The merge step's "fall back to the bigger reconstruction if a pairwise merge fails" logic comes
 from this project's own colmap_merge_loop_smart.sh (see /home/shared/eccv_2026_data) -- lifted as
@@ -48,9 +46,9 @@ Usage -- inside the container (build_container.sh once, then run_container.sh fo
     python run_sequence.py --data ../configs/data/example.yaml --model ../configs/colmap.yaml
 
 The data config picks one sequence of the asset or all of them (see configs/data/); the model
-config holds COLMAP's own knobs (feature extraction, matching, mapping, dense stereo -- see
-`ModelConfig` below, one nested group per underlying colmap command/option-namespace) and is
-reusable across assets. Sequences run one after another, each its own scratch workspace.
+config holds automatic_reconstructor's options plus the dense stage's own knobs (see
+`ModelConfig` below) and is reusable across assets. Sequences run one after another, each its own
+scratch workspace.
 
 Paths are the same inside the container as on the host, so absolute config paths work too.
 Do not run this outside the container: it needs the image's `colmap` CLI binary and pycolmap.
@@ -100,203 +98,29 @@ def _flags(prefix: str | None, cfg, skip: frozenset = frozenset()) -> list[str]:
 
 
 # ---------------------------------------------------------------------------------------------
-# ModelConfig: one nested dataclass per colmap CLI command/option-namespace. Every default below
-# is colmap's own compiled-in default (verified against this submodule checkout's source, cited
-# per group), EXCEPT where this file deliberately picks a different one for this dataset (called
-# out explicitly, e.g. ImageReaderConfig.camera_model/single_camera).
+# ModelConfig: `AutomaticReconstructorConfig` covers the sparse stage (`colmap
+# automatic_reconstructor --dense 0`); PatchMatchConfig/StereoFusionConfig cover the dense stage.
+# Every automatic_reconstructor default below is the value colmap_sparse_loop.sh uses; every dense
+# default is colmap's own compiled-in default unless a comment says otherwise.
 # ---------------------------------------------------------------------------------------------
 
 @dataclasses.dataclass
-class ImageReaderConfig:
-    """feature_extractor's --ImageReader.* flags (controllers/image_reader.h:41-88)."""
-    camera_model: str = "SIMPLE_PINHOLE"   # colmap's own raw default is SIMPLE_RADIAL; we
-                                            # self-calibrate a distortion-free model instead
-    single_camera: bool = True             # colmap's own raw default is False; ours is a fixed
-                                            # render rig, one shared camera for the whole sequence
-    single_camera_per_folder: bool = False
-    single_camera_per_image: bool = False
-    default_focal_length_factor: float = 1.2   # used only if no camera_params and no EXIF focal
-    camera_params: str | None = None       # e.g. "fx,fy,cx,cy" -- None = self-calibrate from scratch
-    mask_path: str | None = None
-    camera_mask_path: str | None = None
-    existing_camera_id: int | None = None  # reuse an existing database camera_id verbatim
-
-
-@dataclasses.dataclass
-class FeatureExtractionConfig:
-    """feature_extractor's --FeatureExtraction.* flags (feature/extractor.h:58-94)."""
+class AutomaticReconstructorConfig:
+    """`colmap automatic_reconstructor`'s own flags. Field names match its CLI flag names exactly,
+    so `_flags(None, cfg)` needs no per-field mapping table. `--dense 0` is always passed (the
+    dense stage is driven separately, below) and is not a field."""
+    data_type: str = "video"           # "individual", "video" or "internet". "video" matches
+                                       # sequentially (neighbouring frames), not exhaustively
+    quality: str = "medium"            # "low", "medium", "high" or "extreme" -- sets feature
+                                       # extraction/matching resolution and effort
+    camera_model: str = "SIMPLE_PINHOLE"   # self-calibrate a distortion-free model
+    single_camera: bool = True         # one shared camera for the whole sequence (a fixed
+                                       # render rig)
+    camera_params: str | None = None   # e.g. "fx,fy,cx,cy"; None = self-calibrate from scratch
     use_gpu: bool = True
-    num_threads: int = -1          # -1 = auto (all cores)
-    gpu_index: str = "-1"          # "-1" = auto-select
-    max_image_size: int = -1       # -1 = no downsampling before extraction
+    gpu_index: str = "-1"              # "-1" = auto-select
+    num_threads: int = -1              # -1 = auto (all cores)
 
-
-@dataclasses.dataclass
-class SiftExtractionConfig:
-    """feature_extractor's --SiftExtraction.* flags (feature/sift.h:41-101) -- the SIFT
-    algorithm's own knobs, on top of FeatureExtractionConfig's type-agnostic ones."""
-    max_num_features: int = 8192
-    first_octave: int = -1
-    num_octaves: int = 4
-    octave_resolution: int = 3
-    peak_threshold: float = 0.02 / 3        # colmap's own default expression: 0.02 / octave_resolution
-    edge_threshold: float = 10.0
-    estimate_affine_shape: bool = False
-    max_num_orientations: int = 2
-    upright: bool = False
-    domain_size_pooling: bool = False       # DSP: average descriptors over a scale range
-    dsp_min_scale: float = 1.0 / 6.0
-    dsp_max_scale: float = 3.0
-    dsp_num_scales: int = 10
-
-
-@dataclasses.dataclass
-class FeatureMatchingConfig:
-    """exhaustive_matcher's --FeatureMatching.* flags (feature/matcher.h:62-108) -- shared by
-    every matcher type, not exhaustive_matcher-specific."""
-    num_threads: int = -1
-    use_gpu: bool = True
-    gpu_index: str = "-1"
-    max_num_matches: int = 32768
-    guided_matching: bool = False
-    skip_geometric_verification: bool = False
-    rig_verification: bool = False
-    skip_image_pairs_in_same_frame: bool = False
-
-
-@dataclasses.dataclass
-class SiftMatchingConfig:
-    """exhaustive_matcher's --SiftMatching.* flags (feature/sift.h:112-138)."""
-    max_ratio: float = 0.8               # Lowe's ratio test threshold
-    max_distance: float = 0.7
-    cross_check: bool = True
-    cpu_brute_force_matcher: bool = False
-    lightglue_min_score: float = 0.1     # only used if type selects LightGlue matching
-
-
-@dataclasses.dataclass
-class TwoViewGeometryConfig:
-    """exhaustive_matcher's --TwoViewGeometry.* flags (estimators/two_view_geometry.h:45-131).
-    max_error/confidence/max_num_trials/min_inlier_ratio are colmap's own RANSAC-tuned overrides
-    on top of the plain RANSACOptions struct's own (much looser) raw defaults."""
-    min_num_inliers: int = 15
-    multiple_models: bool = False
-    compute_relative_pose: bool = False
-    detect_watermark: bool = True
-    multiple_ignore_watermark: bool = True
-    watermark_detection_max_error: float = 4.0
-    filter_stationary_matches: bool = False
-    stationary_matches_max_error: float = 4.0
-    use_degensac: bool = False
-    max_error: float = 4.0               # RANSAC max reprojection/epipolar error, in pixels
-    confidence: float = 0.999            # RANSAC confidence
-    max_num_trials: int = 10000          # RANSAC max iterations
-    min_inlier_ratio: float = 0.25       # RANSAC early-stop inlier ratio
-    random_seed: int = -1
-
-
-@dataclasses.dataclass
-class ExhaustiveMatchingConfig:
-    """exhaustive_matcher's own single flag, on top of the shared groups above
-    (controllers/pairing.h:43-52)."""
-    block_size: int = 50
-
-
-@dataclasses.dataclass
-class MapperConfig:
-    """`colmap mapper`'s --Mapper.* flags: the top-level IncrementalPipelineOptions
-    (controllers/incremental_pipeline.h:47-214) that orchestrate the incremental SfM pipeline as
-    a whole (as opposed to IncrementalMapperConfig below, which tunes one image-registration
-    step at a time)."""
-    min_num_matches: int = 15
-    ignore_watermarks: bool = False
-    multiple_models: bool = True         # reconstruct every disconnected component (why
-                                         # merge_submodels below exists at all)
-    max_num_models: int = 50
-    max_model_overlap: int = 20
-    min_model_size: int = 10
-    init_image_id1: int | None = None    # None = auto-pick the initial image pair
-    init_image_id2: int | None = None
-    init_num_trials: int = 200
-    structure_less_registration_fallback: bool = True
-    structure_less_registration_only: bool = False
-    extract_colors: bool = True
-    num_threads: int = -1
-    random_seed: int = -1
-    min_focal_length_ratio: float = 0.1       # bogus-camera-parameter filter (opening angle ~130deg)
-    max_focal_length_ratio: float = 10.0      # (opening angle ~5deg)
-    max_extra_param: float = 1.0
-    ba_refine_focal_length: bool = True
-    ba_refine_principal_point: bool = False
-    ba_refine_extra_params: bool = True
-    ba_refine_sensor_from_rig: bool = True
-    ba_local_function_tolerance: float = 0.0
-    ba_local_max_num_iterations: int = -1     # -1 = colmap's own internal default schedule
-    ba_global_frames_ratio: float = 1.1       # trigger global BA after this much frame growth
-    ba_global_points_ratio: float = 1.1
-    ba_global_frames_freq: int = 500
-    ba_global_points_freq: int = 250000
-    ba_global_function_tolerance: float = 0.0
-    ba_global_max_num_iterations: int = -1
-    ba_local_max_refinements: int = 2
-    ba_local_max_refinement_change: float = 0.001
-    ba_global_max_refinements: int = 5
-    ba_global_max_refinement_change: float = 0.0005
-    ba_use_gpu: bool = False
-    ba_gpu_index: str = "-1"
-    ba_local_backend: str | None = None       # "CERES" or "CASPAR"
-    ba_global_backend: str | None = None
-    ba_min_num_residuals_for_cpu_multi_threading: int = 50000
-    snapshot_path: str | None = None          # periodic reconstruction checkpoints; unused here
-                                              # (short-lived per-sequence scratch workspace)
-    snapshot_frames_freq: int = 0             # 0 = disabled
-    fix_existing_frames: bool = False
-    max_runtime_seconds: int | None = None    # -1 raw default = unbounded
-
-
-@dataclasses.dataclass
-class IncrementalMapperConfig:
-    """`colmap mapper`'s --Mapper.* flags that tune one image-registration step at a time
-    (sfm/incremental_mapper.h:68-165, `IncrementalMapper::Options`, nested under
-    IncrementalPipelineOptions but flattened into the same `Mapper.` CLI prefix). Only the
-    fields colmap actually CLI-binds from this struct are here -- confirmed against
-    option_manager.cc's own AddMapperOptions() line by line, since several of this struct's own
-    fields (abs_pose_refine_focal_length, use_prior_position, image_selection_method, ...) are
-    NOT CLI-exposed at all, only settable by editing colmap's own source."""
-    init_min_num_inliers: int = 100
-    init_max_error: float = 4.0
-    init_max_forward_motion: float = 0.95
-    init_min_tri_angle: float = 16.0
-    init_max_reg_trials: int = 2
-    abs_pose_max_error: float = 12.0
-    abs_pose_min_num_inliers: int = 30
-    abs_pose_min_inlier_ratio: float = 0.25
-    filter_max_reproj_error: float = 4.0
-    filter_min_tri_angle: float = 1.5
-    max_reg_trials: int = 3
-    ba_local_num_images: int = 6
-    ba_local_min_tri_angle: float = 6.0
-    ba_global_ignore_redundant_points3D: bool = False
-    ba_global_ignore_redundant_points3D_min_coverage_gain: float = 0.05
-
-
-@dataclasses.dataclass
-class TriangulationConfig:
-    """`colmap mapper`'s --Mapper.tri_* flags (sfm/incremental_triangulator.h:45-88,
-    `IncrementalTriangulator::Options`). Field names keep the `tri_` prefix so the generic
-    `_flags("Mapper", ...)` call produces the right `Mapper.tri_*` flag without a separate
-    mapping table."""
-    tri_max_transitivity: int = 1
-    tri_create_max_angle_error: float = 2.0
-    tri_continue_max_angle_error: float = 2.0
-    tri_merge_max_reproj_error: float = 4.0
-    tri_complete_max_reproj_error: float = 4.0
-    tri_complete_max_transitivity: int = 5
-    tri_re_max_angle_error: float = 5.0
-    tri_re_min_ratio: float = 0.2
-    tri_re_max_trials: int = 1
-    tri_min_angle: float = 1.5
-    tri_ignore_two_view_tracks: bool = True
 
 
 @dataclasses.dataclass
@@ -346,16 +170,7 @@ class StereoFusionConfig:
 
 @dataclasses.dataclass
 class ModelConfig:
-    image_reader: ImageReaderConfig = dataclasses.field(default_factory=ImageReaderConfig)
-    feature_extraction: FeatureExtractionConfig = dataclasses.field(default_factory=FeatureExtractionConfig)
-    sift_extraction: SiftExtractionConfig = dataclasses.field(default_factory=SiftExtractionConfig)
-    feature_matching: FeatureMatchingConfig = dataclasses.field(default_factory=FeatureMatchingConfig)
-    sift_matching: SiftMatchingConfig = dataclasses.field(default_factory=SiftMatchingConfig)
-    two_view_geometry: TwoViewGeometryConfig = dataclasses.field(default_factory=TwoViewGeometryConfig)
-    exhaustive_matching: ExhaustiveMatchingConfig = dataclasses.field(default_factory=ExhaustiveMatchingConfig)
-    mapper: MapperConfig = dataclasses.field(default_factory=MapperConfig)
-    incremental_mapper: IncrementalMapperConfig = dataclasses.field(default_factory=IncrementalMapperConfig)
-    triangulation: TriangulationConfig = dataclasses.field(default_factory=TriangulationConfig)
+    automatic_reconstructor: AutomaticReconstructorConfig = dataclasses.field(default_factory=AutomaticReconstructorConfig)
     patch_match: PatchMatchConfig = dataclasses.field(default_factory=PatchMatchConfig)
     stereo_fusion: StereoFusionConfig = dataclasses.field(default_factory=StereoFusionConfig)
     # stereo_fusion's own --input_type flag -- not under the StereoFusion.* namespace, so it
@@ -532,41 +347,24 @@ class COLMAP(Baseline):
             ws = tmp_path / "ws"
             frames_by_name = stage_frames(frames, images_dir)
             ws.mkdir(parents=True, exist_ok=True)
-            database_path = ws / "database.db"
 
-            print(f"running {len(frames)} frames (camera_model={cfg.image_reader.camera_model}) ...")
+            ar = cfg.automatic_reconstructor
+            print(f"running {len(frames)} frames (automatic_reconstructor: "
+                  f"data_type={ar.data_type}, quality={ar.quality}, "
+                  f"camera_model={ar.camera_model}) ...")
+            # Feature extraction + matching + incremental mapping in one call, sparse only
+            # (--dense 0): the dense stage below is driven separately. Writes ws/database.db and
+            # ws/sparse/{0,1,...}, the same layout the separate feature_extractor/mapper commands
+            # produced.
             subprocess.run([
-                "colmap", "feature_extractor",
+                "colmap", "automatic_reconstructor",
                 "--image_path", str(images_dir),
-                "--database_path", str(database_path),
-                *_flags("ImageReader", cfg.image_reader),
-                *_flags("FeatureExtraction", cfg.feature_extraction),
-                *_flags("SiftExtraction", cfg.sift_extraction),
+                "--workspace_path", str(ws),
+                "--dense", "0",
+                *_flags(None, ar),
             ], check=True)
 
-            subprocess.run([
-                "colmap", "exhaustive_matcher",
-                "--database_path", str(database_path),
-                *_flags("FeatureMatching", cfg.feature_matching),
-                *_flags("SiftMatching", cfg.sift_matching),
-                *_flags("TwoViewGeometry", cfg.two_view_geometry),
-                *_flags("ExhaustiveMatching", cfg.exhaustive_matching),
-            ], check=True)
-
-            # `colmap mapper` requires --output_path to already exist (it CHECK-fails and aborts
-            # otherwise, same as `global_mapper` in the glomap baseline).
             sparse_dir = ws / "sparse"
-            sparse_dir.mkdir(parents=True, exist_ok=True)
-            subprocess.run([
-                "colmap", "mapper",
-                "--image_path", str(images_dir),
-                "--database_path", str(database_path),
-                "--output_path", str(sparse_dir),
-                *_flags("Mapper", cfg.mapper),
-                *_flags("Mapper", cfg.incremental_mapper),
-                *_flags("Mapper", cfg.triangulation),
-            ], check=True)
-
             if not sparse_dir.is_dir() or not any(sparse_dir.iterdir()):
                 raise SystemExit("COLMAP registered no images at all for this sequence "
                                  "(mapper produced no sparse/ sub-model)")

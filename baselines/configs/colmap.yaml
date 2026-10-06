@@ -1,167 +1,31 @@
-# Baseline config for classical COLMAP (sparse SfM + dense MVS): its own knobs, nothing about
-# which data to run on. Reusable across assets — pair it with a data config from configs/data/:
+# Baseline config for classical COLMAP: the sparse stage (feature extraction, matching, incremental
+# SfM) runs through `colmap automatic_reconstructor --dense 0`; the dense stage (patch_match_stereo
+# + stereo_fusion) is driven separately. Its own knobs, nothing about which data to run on.
+# Reusable across assets -- pair it with a data config from configs/data/:
 #
 #   python run_sequence.py --data ../configs/data/old_house.yaml --model ../configs/colmap.yaml
 #
-# Every field has a default in run_sequence.py's dataclasses -- colmap's own compiled-in default
-# unless a comment there says otherwise -- only override what you need. Fields are grouped one
-# nested block per underlying colmap command/option-namespace (feature_extractor's
-# --ImageReader.*/--FeatureExtraction.*/--SiftExtraction.*, exhaustive_matcher's
-# --FeatureMatching.*/--SiftMatching.*/--TwoViewGeometry.*/--ExhaustiveMatching.*, `colmap
-# mapper`'s --Mapper.* across three groups, then patch_match_stereo's/stereo_fusion's own), so a
-# group name here always matches the flag prefix it maps to -- see run_sequence.py's own
-# `ModelConfig` for exactly which struct/file:line each default came from.
+# Every field has a default in run_sequence.py's dataclasses -- only override what you need.
+# `automatic_reconstructor`'s fields match its own CLI flag names; everything else about feature
+# extraction, matching and mapping is chosen by colmap from `data_type` and `quality` and is not
+# configurable from here. The dense groups map one-to-one onto patch_match_stereo's
+# --PatchMatchStereo.* and stereo_fusion's --StereoFusion.* flags -- see run_sequence.py's own
+# `ModelConfig`.
 #
 # A copy of this, plus the data config and the variants that ran, is written to
 # <asset>/predictions/<method>/config.yaml after each run.
 
 model:
-  image_reader:
-    camera_model: SIMPLE_PINHOLE   # self-calibrated, no known intrinsics fed in
-    single_camera: true            # one shared camera for the whole sequence (a fixed render rig)
-    single_camera_per_folder: false
-    single_camera_per_image: false
-    default_focal_length_factor: 1.2
-    camera_params: null            # e.g. "fx,fy,cx,cy" -- null = self-calibrate from scratch
-    mask_path: null
-    camera_mask_path: null
-    existing_camera_id: null
-
-  feature_extraction:
+  automatic_reconstructor:
+    data_type: video              # "individual" | "video" | "internet". "video" = sequential
+                                  # matching of neighbouring frames, as in colmap_sparse_loop.sh
+    quality: medium               # "low" | "medium" | "high" | "extreme"
+    camera_model: SIMPLE_PINHOLE  # self-calibrated, no known intrinsics fed in
+    single_camera: true           # one shared camera for the whole sequence (a fixed render rig)
+    camera_params: null           # e.g. "fx,fy,cx,cy" -- null = self-calibrate from scratch
     use_gpu: true
-    num_threads: -1                # -1 = auto (all cores)
-    gpu_index: "-1"                # "-1" = auto-select
-    max_image_size: -1             # -1 = no downsampling before extraction
-
-  sift_extraction:
-    max_num_features: 8192
-    first_octave: -1
-    num_octaves: 4
-    octave_resolution: 3
-    peak_threshold: 0.006666666666666667   # colmap's own default: 0.02 / octave_resolution
-    edge_threshold: 10.0
-    estimate_affine_shape: false
-    max_num_orientations: 2
-    upright: false
-    domain_size_pooling: false
-    dsp_min_scale: 0.16666666666666666
-    dsp_max_scale: 3.0
-    dsp_num_scales: 10
-
-  feature_matching:
-    num_threads: -1
-    use_gpu: true
-    gpu_index: "-1"
-    max_num_matches: 32768
-    guided_matching: false
-    skip_geometric_verification: false
-    rig_verification: false
-    skip_image_pairs_in_same_frame: false
-
-  sift_matching:
-    max_ratio: 0.8                 # Lowe's ratio test threshold
-    max_distance: 0.7
-    cross_check: true
-    cpu_brute_force_matcher: false
-    lightglue_min_score: 0.1       # only used if type selects LightGlue matching
-
-  two_view_geometry:
-    min_num_inliers: 15
-    multiple_models: false
-    compute_relative_pose: false
-    detect_watermark: true
-    multiple_ignore_watermark: true
-    watermark_detection_max_error: 4.0
-    filter_stationary_matches: false
-    stationary_matches_max_error: 4.0
-    use_degensac: false
-    max_error: 4.0                 # RANSAC max reprojection/epipolar error, in pixels
-    confidence: 0.999               # RANSAC confidence
-    max_num_trials: 10000           # RANSAC max iterations
-    min_inlier_ratio: 0.25          # RANSAC early-stop inlier ratio
-    random_seed: -1
-
-  exhaustive_matching:
-    block_size: 50
-
-  mapper:
-    # `colmap mapper`'s top-level (IncrementalPipelineOptions) knobs.
-    min_num_matches: 15
-    ignore_watermarks: false
-    multiple_models: true # reconstruct every disconnected component (why the
-                                    # merge_submodels step in run_sequence.py exists at all)
-    max_num_models: 50
-    max_model_overlap: 20
-    min_model_size: 10
-    init_image_id1: null           # null = auto-pick the initial image pair
-    init_image_id2: null
-    init_num_trials: 200
-    structure_less_registration_fallback: true
-    structure_less_registration_only: false
-    extract_colors: true
-    num_threads: -1
-    random_seed: -1
-    min_focal_length_ratio: 0.1    # bogus-camera-parameter filter (opening angle ~130deg)
-    max_focal_length_ratio: 10.0   # (opening angle ~5deg)
-    max_extra_param: 1.0
-    ba_refine_focal_length: true
-    ba_refine_principal_point: false
-    ba_refine_extra_params: true
-    ba_refine_sensor_from_rig: true
-    ba_local_function_tolerance: 0.0
-    ba_local_max_num_iterations: -1
-    ba_global_frames_ratio: 1.1
-    ba_global_points_ratio: 1.1
-    ba_global_frames_freq: 500
-    ba_global_points_freq: 250000
-    ba_global_function_tolerance: 0.0
-    ba_global_max_num_iterations: -1
-    ba_local_max_refinements: 2
-    ba_local_max_refinement_change: 0.001
-    ba_global_max_refinements: 5
-    ba_global_max_refinement_change: 0.0005
-    ba_use_gpu: false
-    ba_gpu_index: "-1"
-    ba_local_backend: null         # "CERES" or "CASPAR"
-    ba_global_backend: null
-    ba_min_num_residuals_for_cpu_multi_threading: 50000
-    snapshot_path: null            # periodic checkpoints; unused (short-lived scratch workspace)
-    snapshot_frames_freq: 0        # 0 = disabled
-    fix_existing_frames: false
-    max_runtime_seconds: null      # null = unbounded
-
-  incremental_mapper:
-    # `colmap mapper`'s per-image-registration (IncrementalMapper::Options) knobs -- still
-    # `Mapper.*` flags, just a different underlying struct (see run_sequence.py's own comment).
-    init_min_num_inliers: 100
-    init_max_error: 4.0
-    init_max_forward_motion: 0.95
-    init_min_tri_angle: 16.0
-    init_max_reg_trials: 2
-    abs_pose_max_error: 12.0
-    abs_pose_min_num_inliers: 30
-    abs_pose_min_inlier_ratio: 0.25
-    filter_max_reproj_error: 4.0
-    filter_min_tri_angle: 1.5
-    max_reg_trials: 3
-    ba_local_num_images: 6
-    ba_local_min_tri_angle: 6.0
-    ba_global_ignore_redundant_points3D: false
-    ba_global_ignore_redundant_points3D_min_coverage_gain: 0.05
-
-  triangulation:
-    # `colmap mapper`'s --Mapper.tri_* flags (IncrementalTriangulator::Options).
-    tri_max_transitivity: 1
-    tri_create_max_angle_error: 2.0
-    tri_continue_max_angle_error: 2.0
-    tri_merge_max_reproj_error: 4.0
-    tri_complete_max_reproj_error: 4.0
-    tri_complete_max_transitivity: 5
-    tri_re_max_angle_error: 5.0
-    tri_re_min_ratio: 0.2
-    tri_re_max_trials: 1
-    tri_min_angle: 1.5
-    tri_ignore_two_view_tracks: true
+    gpu_index: "-1"               # "-1" = auto-select
+    num_threads: -1               # -1 = auto (all cores)
 
   patch_match:
     max_image_size: 480
