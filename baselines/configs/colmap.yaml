@@ -29,6 +29,8 @@ model:
 
   patch_match:
     max_image_size: 480
+    depth_min: 0.1
+    depth_max: 500.0
     window_radius: 5
     window_step: 1
     sigma_spatial: 5.0
