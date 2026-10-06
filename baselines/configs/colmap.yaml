@@ -88,7 +88,7 @@ model:
     # `colmap mapper`'s top-level (IncrementalPipelineOptions) knobs.
     min_num_matches: 15
     ignore_watermarks: false
-    # multiple_models: true # reconstruct every disconnected component (why the
+    multiple_models: true # reconstruct every disconnected component (why the
                                     # merge_submodels step in run_sequence.py exists at all)
     max_num_models: 50
     max_model_overlap: 20
