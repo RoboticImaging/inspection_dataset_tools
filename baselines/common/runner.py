@@ -21,7 +21,7 @@ import argparse
 import dataclasses
 from datetime import datetime
 from pathlib import Path
-
+import os
 import numpy as np
 import yaml
 
@@ -236,11 +236,19 @@ def write_run_config(root: Path, layout: Layout, method: str, baseline: Baseline
     path.write_text(yaml.safe_dump(payload, sort_keys=False))
     return path
 
+def add_device_arg(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--cuda-device", default=None, metavar="IDS",
+                   help="GPU(s) to use, e.g. 1 or 0,1. Sets CUDA_VISIBLE_DEVICES for this run "
+                        "and any subprocesses. If omitted, the environment is left untouched.")
+
 
 def run_from_args(baseline_cls: type, args) -> list[Variant]:
     """Run `baseline_cls` from parsed `add_config_args` arguments — the tail end of both
     entry points (a baseline's own `run_sequence.py` and `baselines/run.py`)."""
     cfg = config_from_args(args, baseline_cls.Config)
+    cuda_device = getattr(args, "cuda_device", None)
+    if cuda_device is not None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(cuda_device)
     return run_baseline(baseline_cls(cfg.model), cfg)
 
 
@@ -249,4 +257,5 @@ def cli_main(baseline_cls: type, argv=None, description: str = None) -> list[Var
     p = argparse.ArgumentParser(description=description or baseline_cls.__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     add_config_args(p)
+    add_device_arg(p)
     return run_from_args(baseline_cls, p.parse_args(argv))

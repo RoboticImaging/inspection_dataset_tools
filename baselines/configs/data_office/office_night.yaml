@@ -12,7 +12,7 @@ asset: /home/shared/eccv_2026_data/office_dynamic/   # the asset folder, e.g. ..
 trajectory: null
 illumination: night
 soil: null
-reflectivity: 1.0          # or `reflectivity:`, whichever axis this asset varies
+reflectivity: null # or `reflectivity:`, whichever axis this asset varies
 
 frame_start: 0
 frame_end: null               # exclusive; null = to the end

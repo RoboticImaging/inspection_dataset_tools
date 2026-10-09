@@ -71,6 +71,7 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
+import os
 import cv2
 import h5py
 import numpy as np
