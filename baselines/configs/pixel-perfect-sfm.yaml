@@ -4,10 +4,13 @@
 #
 #   python run_sequence.py --data ../configs/data/old_house.yaml --model ../configs/pixel-perfect-sfm.yaml
 #
-# Every field has a default in run_sequence.py's dataclasses. image_reader through stereo_fusion
-# (plus depth_source) are the same colmap-CLI knobs as ../configs/colmap.yaml, with the same
-# meaning — see that file's own comments. dense_features/interpolation/ka/ba are new here: they
-# go to pixsfm's own Python API (pixsfm.refine_colmap.PixSfM), not colmap's CLI, and every
+# Every field has a default in run_sequence.py's dataclasses. automatic_reconstructor through
+# stereo_fusion (plus depth_source) are the same colmap-CLI knobs as ../configs/colmap.yaml, with the same
+# meaning — see that file's own comments. automatic_reconstructor is identical to colmap.yaml's and
+# covers feature extraction + matching only (`--sparse 0 --dense 0` are always passed): mapping
+# stays a separate `colmap mapper` stage (mapper/incremental_mapper/triangulation below) so
+# keypoint adjustment can run between matching and mapping. dense_features/interpolation/ka/ba are
+# new here: they go to pixsfm's own Python API (pixsfm.refine_colmap.PixSfM), not colmap's CLI, and every
 # default was read directly from this exact submodule's source, NOT from its own README (which
 # is stale in several places — see run_sequence.py's module docstring for specifics).
 #
@@ -46,73 +49,16 @@
 # <asset>/predictions/<method>/config.yaml after each run.
 
 model:
-  image_reader:
-    camera_model: SIMPLE_PINHOLE
-    single_camera: true
-    single_camera_per_folder: false
-    single_camera_per_image: false
-    default_focal_length_factor: 1.2
-    camera_params: null
-    mask_path: null
-    camera_mask_path: null
-    existing_camera_id: null
-
-  feature_extraction:
+  automatic_reconstructor:
+    data_type: video              # "individual" | "video" | "internet". "video" = sequential
+                                  # matching of neighbouring frames, as in colmap_sparse_loop.sh
+    quality: medium               # "low" | "medium" | "high" | "extreme"
+    camera_model: SIMPLE_PINHOLE  # self-calibrated, no known intrinsics fed in
+    single_camera: true           # one shared camera for the whole sequence (a fixed render rig)
+    camera_params: null           # e.g. "fx,fy,cx,cy" -- null = self-calibrate from scratch
     use_gpu: true
-    num_threads: -1
-    gpu_index: "-1"
-    max_image_size: -1
-
-  sift_extraction:
-    max_num_features: 8192
-    first_octave: -1
-    num_octaves: 4
-    octave_resolution: 3
-    peak_threshold: 0.006666666666666667
-    edge_threshold: 10.0
-    estimate_affine_shape: false
-    max_num_orientations: 2
-    upright: false
-    domain_size_pooling: false
-    dsp_min_scale: 0.16666666666666666
-    dsp_max_scale: 3.0
-    dsp_num_scales: 10
-
-  feature_matching:
-    num_threads: -1
-    use_gpu: true
-    gpu_index: "-1"
-    max_num_matches: 32768
-    guided_matching: false
-    skip_geometric_verification: false
-    rig_verification: false
-    skip_image_pairs_in_same_frame: false
-
-  sift_matching:
-    max_ratio: 0.8
-    max_distance: 0.7
-    cross_check: true
-    cpu_brute_force_matcher: false
-    lightglue_min_score: 0.1
-
-  two_view_geometry:
-    min_num_inliers: 15
-    multiple_models: false
-    compute_relative_pose: false
-    detect_watermark: true
-    multiple_ignore_watermark: true
-    watermark_detection_max_error: 4.0
-    filter_stationary_matches: false
-    stationary_matches_max_error: 4.0
-    use_degensac: false
-    max_error: 4.0
-    confidence: 0.999
-    max_num_trials: 10000
-    min_inlier_ratio: 0.25
-    random_seed: -1
-
-  exhaustive_matching:
-    block_size: 50
+    gpu_index: "-1"               # "-1" = auto-select
+    num_threads: -1               # -1 = auto (all cores)
 
   mapper:
     min_num_matches: 15
@@ -210,6 +156,8 @@ model:
     num_threads: -1
     write_consistency_graph: false
     allow_missing_files: false
+    depth_min: 0.1
+    depth_max: 500.0
 
   stereo_fusion:
     max_image_size: 480

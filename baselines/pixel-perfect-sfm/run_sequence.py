@@ -5,26 +5,31 @@ and write depth + pose + point-cloud predictions back into the asset folder
 inspection_viz's Source toggle picks them up unchanged.
 
 Architecturally this is baselines/colmap/run_sequence.py's sibling, not baselines/glomap's: same
-feature_extractor -> exhaustive_matcher -> mapper -> merge_submodels -> dense MVS pipeline,
-driven the same way (colmap CLI subprocesses, reused verbatim -- `stage_frames`,
-`merge_submodels`/`_images_count`, `c2w_from_image`, `K_from_camera`, `_gt_frame0_alignment`,
-`read_depth_map`, `_flags`, and every ImageReader/FeatureExtraction/SiftExtraction/
-FeatureMatching/SiftMatching/TwoViewGeometry/ExhaustiveMatching/Mapper/IncrementalMapper/
-Triangulation/PatchMatch/StereoFusion config group are duplicated verbatim from
-baselines/colmap/run_sequence.py, not imported -- this repo's established per-baseline
-self-containment convention) -- EXCEPT the `run()` method's own `_flags(...)` call sites, which
-are NOT verbatim: this baseline's Dockerfile pins its own `colmap` binary to COLMAP 3.8 (see the
-Dockerfile's own header), whose CLI predates several option-group splits/renames (and some
-options outright) that baselines/colmap's own newer `colmap` binary has. `_flags()` itself grew
-`skip`/`rename` params for exactly this; see its own docstring and the `run()` method's inline
-comments for the specific COLMAP-3.8 differences, confirmed against COLMAP 3.8's own
-src/util/option_manager.cc, not guessed. Don't re-sync `run()` back to colmap's own file's
-`_flags()` calls verbatim -- that reintroduces "unrecognised option" failures against 3.8.
+pipeline, driven the same way (colmap CLI subprocesses). The front end is shared with that
+baseline: feature extraction and matching run as one
+`colmap automatic_reconstructor --extraction 1 --matching 1 --sparse 0 --dense 0` call, configured
+by the same `AutomaticReconstructorConfig` (data_type, quality, camera_model, single_camera, ...),
+so the same yaml values give both baselines identical features and an identical match graph.
+Mapping is NOT part of that call (`--sparse 0`): it stays a separate `colmap mapper` stage,
+driven by the Mapper/IncrementalMapper/Triangulation groups below, so pixsfm's keypoint
+adjustment can slot in between matching and mapping. `stage_frames`, `merge_submodels`/
+`_images_count`, `c2w_from_image`, `K_from_camera`, `_gt_frame0_alignment`, `read_depth_map`,
+`_flags`, and the AutomaticReconstructor/Mapper/IncrementalMapper/Triangulation/PatchMatch/
+StereoFusion config groups are duplicated from baselines/colmap/run_sequence.py, not imported --
+this repo's established per-baseline self-containment convention -- EXCEPT the `run()` method's
+mapper/patch_match `_flags(...)` call sites, which are NOT verbatim: this baseline's Dockerfile
+pins its own `colmap` binary to COLMAP 3.8 (see the Dockerfile's own header), whose CLI predates
+several option-group splits/renames (and some options outright) that baselines/colmap's own newer
+`colmap` binary has. `_flags()` itself grew `skip`/`rename` params for exactly this; see its own
+docstring and the `run()` method's inline comments for the specific COLMAP-3.8 differences,
+confirmed against COLMAP 3.8's own src/util/option_manager.cc, not guessed. Don't re-sync `run()`
+back to colmap's own file's `_flags()` calls verbatim -- that reintroduces "unrecognised option"
+failures against 3.8.
 What's new here is two extra refinement steps `pixsfm` inserts
 into that same pipeline, both operating through its own `pixsfm.refine_colmap.PixSfM` Python API
 (not a CLI) rather than colmap's:
 
-  1. Keypoint adjustment (KA), between exhaustive_matcher and mapper: refines the 2D keypoint
+  1. Keypoint adjustment (KA), between matching and mapper: refines the 2D keypoint
      locations of all tentatively-matched features by minimizing their feature-metric
      inconsistency across views, writing a new COLMAP database that `colmap mapper` is then run
      on instead of the raw one -- so the incremental reconstruction itself benefits from more
@@ -119,89 +124,28 @@ def _flags(prefix: str | None, cfg, skip: frozenset = frozenset(),
 
 # ---------------------------------------------------------------------------------------------
 # Colmap-side ModelConfig groups: identical to baselines/colmap/run_sequence.py's own (duplicated,
-# not imported -- see module docstring). Comments trimmed to what's not already said there.
+# not imported -- see module docstring). AutomaticReconstructorConfig covers feature extraction +
+# matching here (`--sparse 0 --dense 0` are always passed -- mapping and the dense stage are
+# driven separately). Comments trimmed to what's not already said there.
 # ---------------------------------------------------------------------------------------------
 
 @dataclasses.dataclass
-class ImageReaderConfig:
-    camera_model: str = "SIMPLE_PINHOLE"
-    single_camera: bool = True
-    single_camera_per_folder: bool = False
-    single_camera_per_image: bool = False
-    default_focal_length_factor: float = 1.2
-    camera_params: str | None = None
-    mask_path: str | None = None
-    camera_mask_path: str | None = None
-    existing_camera_id: int | None = None
-
-
-@dataclasses.dataclass
-class FeatureExtractionConfig:
+class AutomaticReconstructorConfig:
+    """`colmap automatic_reconstructor`'s own flags. Field names match its CLI flag names exactly,
+    so `_flags(None, cfg)` needs no per-field mapping table. `--extraction 1 --matching 1
+    --sparse 0 --dense 0` are always passed (mapping and the dense stage are driven separately,
+    below) and are not fields."""
+    data_type: str = "video"           # "individual", "video" or "internet". "video" matches
+                                       # sequentially (neighbouring frames), not exhaustively
+    quality: str = "medium"            # "low", "medium", "high" or "extreme" -- sets feature
+                                       # extraction/matching resolution and effort
+    camera_model: str = "SIMPLE_PINHOLE"   # self-calibrate a distortion-free model
+    single_camera: bool = True         # one shared camera for the whole sequence (a fixed
+                                       # render rig)
+    camera_params: str | None = None   # e.g. "fx,fy,cx,cy"; None = self-calibrate from scratch
     use_gpu: bool = True
-    num_threads: int = -1
-    gpu_index: str = "-1"
-    max_image_size: int = -1
-
-
-@dataclasses.dataclass
-class SiftExtractionConfig:
-    max_num_features: int = 8192
-    first_octave: int = -1
-    num_octaves: int = 4
-    octave_resolution: int = 3
-    peak_threshold: float = 0.02 / 3
-    edge_threshold: float = 10.0
-    estimate_affine_shape: bool = False
-    max_num_orientations: int = 2
-    upright: bool = False
-    domain_size_pooling: bool = False
-    dsp_min_scale: float = 1.0 / 6.0
-    dsp_max_scale: float = 3.0
-    dsp_num_scales: int = 10
-
-
-@dataclasses.dataclass
-class FeatureMatchingConfig:
-    num_threads: int = -1
-    use_gpu: bool = True
-    gpu_index: str = "-1"
-    max_num_matches: int = 32768
-    guided_matching: bool = False
-    skip_geometric_verification: bool = False
-    rig_verification: bool = False
-    skip_image_pairs_in_same_frame: bool = False
-
-
-@dataclasses.dataclass
-class SiftMatchingConfig:
-    max_ratio: float = 0.8
-    max_distance: float = 0.7
-    cross_check: bool = True
-    cpu_brute_force_matcher: bool = False
-    lightglue_min_score: float = 0.1
-
-
-@dataclasses.dataclass
-class TwoViewGeometryConfig:
-    min_num_inliers: int = 15
-    multiple_models: bool = False
-    compute_relative_pose: bool = False
-    detect_watermark: bool = True
-    multiple_ignore_watermark: bool = True
-    watermark_detection_max_error: float = 4.0
-    filter_stationary_matches: bool = False
-    stationary_matches_max_error: float = 4.0
-    use_degensac: bool = False
-    max_error: float = 4.0
-    confidence: float = 0.999
-    max_num_trials: int = 10000
-    min_inlier_ratio: float = 0.25
-    random_seed: int = -1
-
-
-@dataclasses.dataclass
-class ExhaustiveMatchingConfig:
-    block_size: int = 50
+    gpu_index: str = "-1"              # "-1" = auto-select
+    num_threads: int = -1              # -1 = auto (all cores)
 
 
 @dataclasses.dataclass
@@ -530,14 +474,9 @@ class BAConfig:
 
 @dataclasses.dataclass
 class ModelConfig:
-    # Colmap-side (identical to baselines/colmap/run_sequence.py's own ModelConfig).
-    image_reader: ImageReaderConfig = dataclasses.field(default_factory=ImageReaderConfig)
-    feature_extraction: FeatureExtractionConfig = dataclasses.field(default_factory=FeatureExtractionConfig)
-    sift_extraction: SiftExtractionConfig = dataclasses.field(default_factory=SiftExtractionConfig)
-    feature_matching: FeatureMatchingConfig = dataclasses.field(default_factory=FeatureMatchingConfig)
-    sift_matching: SiftMatchingConfig = dataclasses.field(default_factory=SiftMatchingConfig)
-    two_view_geometry: TwoViewGeometryConfig = dataclasses.field(default_factory=TwoViewGeometryConfig)
-    exhaustive_matching: ExhaustiveMatchingConfig = dataclasses.field(default_factory=ExhaustiveMatchingConfig)
+    # Colmap-side (same groups as baselines/colmap/run_sequence.py's own ModelConfig, except that
+    # the mapper stage's knobs stay individually exposed here -- see module docstring).
+    automatic_reconstructor: AutomaticReconstructorConfig = dataclasses.field(default_factory=AutomaticReconstructorConfig)
     mapper: MapperConfig = dataclasses.field(default_factory=MapperConfig)
     incremental_mapper: IncrementalMapperConfig = dataclasses.field(default_factory=IncrementalMapperConfig)
     triangulation: TriangulationConfig = dataclasses.field(default_factory=TriangulationConfig)
@@ -698,60 +637,28 @@ class PixelPerfectSfM(Baseline):
             ws.mkdir(parents=True, exist_ok=True)
             database_path = ws / "database.db"
 
-            print(f"running {len(frames)} frames (camera_model={cfg.image_reader.camera_model}, "
-                 f"KA={'on' if cfg.ka.apply else 'off'}, BA={'on' if cfg.ba.apply else 'off'}) ...")
-            # COLMAP 3.8 has no separate `FeatureExtraction.*`/`FeatureMatching.*`/
-            # `TwoViewGeometry.*` option groups -- those splits (and Rig/Frame-only fields like
-            # rig_verification, plus newer robustness knobs like watermark/DEGENSAC detection and
-            # LightGlue support) postdate 3.8. Everything below that DOES exist in 3.8 lived under
-            # `SiftExtraction.*`/`SiftMatching.*` instead -- confirmed against COLMAP 3.8's own
-            # src/util/option_manager.cc, not guessed. See _flags()'s own docstring.
-            #
-            # cfg.feature_extraction.max_image_size defaults to -1, meaning "don't downscale" in
-            # the newer colmap this config group was written against (its own
-            # SiftExtractionOptions::Check() dropped the positivity check entirely). COLMAP 3.8's
-            # own Check() still hard-requires max_image_size > 0 -- real error seen: "[sift.cc:376]
-            # Check failed: max_image_size > 0 (-1 vs. 0)". Substituted with a value comfortably
-            # above any real camera resolution (every image sampled across this repo's own
-            # datasets is <= 1920x1080) whenever it isn't already positive, rather than hardcoding
-            # 3.8's own default of 3200 -- some future higher-resolution capture could exceed that.
-            _NO_MAX_IMAGE_SIZE_3_8 = 65536
-            feature_extraction_size = (cfg.feature_extraction.max_image_size
-                                        if cfg.feature_extraction.max_image_size > 0
-                                        else _NO_MAX_IMAGE_SIZE_3_8)
+            ar = cfg.automatic_reconstructor
+            print(f"running {len(frames)} frames (automatic_reconstructor: "
+                  f"data_type={ar.data_type}, quality={ar.quality}, "
+                  f"camera_model={ar.camera_model}, "
+                  f"KA={'on' if cfg.ka.apply else 'off'}, BA={'on' if cfg.ba.apply else 'off'}) ...")
+            # Feature extraction + matching only (--sparse 0 --dense 0): same call, same options
+            # as baselines/colmap's, minus its mapping stage. Writes ws/database.db (features,
+            # matches, verified two-view geometries). Mapping below stays a separate
+            # `colmap mapper` so keypoint adjustment can run on the database first.
             subprocess.run([
-                "colmap", "feature_extractor",
+                "colmap", "automatic_reconstructor",
                 "--image_path", str(images_dir),
-                "--database_path", str(database_path),
-                *_flags("ImageReader", cfg.image_reader),
-                *_flags("SiftExtraction", cfg.feature_extraction, skip=frozenset({"max_image_size"})),
-                "--SiftExtraction.max_image_size", str(feature_extraction_size),
-                *_flags("SiftExtraction", cfg.sift_extraction),
+                "--workspace_path", str(ws),
+                "--extraction", "1",
+                "--matching", "1",
+                "--sparse", "0",
+                "--dense", "0",
+                *_flags(None, ar),
             ], check=True)
-
-            subprocess.run([
-                "colmap", "exhaustive_matcher",
-                "--database_path", str(database_path),
-                *_flags("SiftMatching", cfg.feature_matching, skip=frozenset({
-                    "skip_geometric_verification", "rig_verification",
-                    "skip_image_pairs_in_same_frame",
-                })),
-                *_flags("SiftMatching", cfg.sift_matching, skip=frozenset({
-                    "cpu_brute_force_matcher", "lightglue_min_score",
-                })),
-                *_flags("SiftMatching", cfg.two_view_geometry, skip=frozenset({
-                    "detect_watermark", "multiple_ignore_watermark",
-                    "watermark_detection_max_error", "filter_stationary_matches",
-                    "stationary_matches_max_error", "use_degensac",
-                    # COLMAP 3.8 has one GLOBAL --random_seed, not a per-stage
-                    # TwoViewGeometry.random_seed/Mapper.random_seed (see the Mapper call's own
-                    # skip below too) -- real error seen: "unrecognised option
-                    # '--SiftMatching.random_seed'". Both configs here are already at the class
-                    # default (-1, "no preference"), so dropping them changes nothing intended.
-                    "random_seed",
-                })),
-                *_flags("ExhaustiveMatching", cfg.exhaustive_matching),
-            ], check=True)
+            if not database_path.is_file():
+                raise SystemExit("automatic_reconstructor produced no database.db "
+                                 "(feature extraction/matching did not run)")
 
             # One PixSfM instance drives both refinement steps below, so its dense feature
             # extractor (and cache, if dense_features.use_cache) is shared between them instead
