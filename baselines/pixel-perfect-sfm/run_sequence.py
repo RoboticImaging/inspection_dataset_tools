@@ -652,8 +652,6 @@ class PixelPerfectSfM(Baseline):
                 "colmap", "automatic_reconstructor",
                 "--image_path", str(images_dir),
                 "--workspace_path", str(ws),
-                "--extraction", "1",
-                "--matching", "1",
                 "--sparse", "0",
                 "--dense", "0",
                 *_flags(None, ar),
