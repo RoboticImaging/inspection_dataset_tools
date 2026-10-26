@@ -50,6 +50,31 @@ def read_depth(path: Path) -> np.ndarray:
     return DEPTH_READERS[path.suffix.lower()](path)
 
 
+def _read_mask_img(path: Path) -> np.ndarray:
+    img = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+    if img is None:
+        raise IOError(f"cannot read mask: {path}")
+    return img[..., 0] if img.ndim == 3 else img
+
+
+def _read_mask_npy(path: Path) -> np.ndarray:
+    m = np.load(path)
+    return m[..., 0] if m.ndim == 3 else m
+
+
+MASK_READERS = {".png": _read_mask_img, ".tiff": _read_mask_img, ".tif": _read_mask_img,
+                ".npy": _read_mask_npy}
+
+
+def read_mask(path: Path) -> np.ndarray:
+    """An evaluation-region mask as a boolean (H,W) array, True = consider the pixel.
+
+    Masks hold 0 for "ignore" and 1 (or close to it, e.g. 0.99 after resampling) for "consider";
+    thresholding at 0.5 keeps both of those -- and 0/255 8-bit pngs -- working, without letting a
+    faint nonzero residue of resampling count as inside the region."""
+    return MASK_READERS[path.suffix.lower()](path) > 0.5
+
+
 def read_cloud(path: Path) -> tuple[np.ndarray, np.ndarray | None]:
     """A point cloud file (.ply): (N,3) float32 xyz, plus (N,3) uint8 rgb or None if uncolored."""
     cloud = trimesh.load(path, process=False)

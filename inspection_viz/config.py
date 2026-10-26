@@ -22,6 +22,11 @@ class Layout:
     )
     depth_dir: str = "depths/traj={traj}"
     cam_dir: str = "cam_params/traj={traj}"
+    # Evaluation-region masks, beside depths/ with the same structure and frame numbering. Pixel
+    # 0 = ignore, anything else = inside the region. window_masks only exist for scenes that have
+    # windows (the dir is simply absent otherwise).
+    mask_dir: str = "masks/traj={traj}"
+    window_mask_dir: str = "window_masks/traj={traj}"
     # Baseline predictions live alongside gt data, keyed by {method} (e.g. "da3") *and* the full
     # variant. Note these mirror rgb_dir's placeholders, not depth_dir's: gt depth is a render of
     # fixed scene geometry, so one gt sequence serves every illumination/soil of a trajectory --
@@ -65,6 +70,7 @@ class Layout:
     rgb_exts: tuple = (".jpg", ".jpeg", ".png")
     depth_exts: tuple = (".exr",)
     cam_exts: tuple = (".json",)
+    mask_exts: tuple = (".png", ".npy", ".tif", ".tiff")
     depth_scale: float = 1.0  # multiplier to convert stored depth to meters
     frame_id: str = r"(\d+)"  # last match in the file stem is the frame index
 

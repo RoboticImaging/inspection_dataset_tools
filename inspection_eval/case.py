@@ -121,6 +121,24 @@ class EvalCase:
         pred = _clean(self.pred_frames[index].depth(), far=_far(self.raw_pred_cams.get(index)))
         return match_size(gt, pred)
 
+    def mask_available(self, kind: str, frames) -> bool:
+        """True only if *every one of* `frames` has a `kind` mask ("mask" or "window").
+        All-or-nothing on purpose: silently evaluating a region on a subset of frames would
+        bias it."""
+        frames = list(frames)
+        return bool(frames) and all(
+            self.gt_frames[i].mask_paths.get(kind) is not None for i in frames)
+
+    def mask(self, index: int, kind: str, shape: tuple[int, int]) -> np.ndarray:
+        """Boolean region mask for one gt frame, resized (nearest) to `shape` = (h, w)."""
+        m = self.gt_frames[index].mask(kind)
+        if m is None:
+            raise FileNotFoundError(f"no {kind} mask for frame {index}")
+        if m.shape != tuple(shape):
+            m = cv2.resize(m.astype(np.uint8), (shape[1], shape[0]),
+                           interpolation=cv2.INTER_NEAREST).astype(bool)
+        return m
+
     # --- clouds ---------------------------------------------------------------------------
 
     @cached_property

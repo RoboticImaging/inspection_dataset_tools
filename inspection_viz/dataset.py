@@ -30,8 +30,10 @@ class Variant:
 
 class Frame:
     def __init__(self, index: int, rgb_path: Path,
-                 depth_path: Path | None, cam_path: Path | None, layout: Layout):
+                 depth_path: Path | None, cam_path: Path | None, layout: Layout,
+                 mask_paths: dict[str, Path | None] | None = None):
         self.index = index
+        self.mask_paths = mask_paths or {}  # {"mask": Path, "window": Path}; only gt has these
         self.rgb_path = rgb_path
         self.depth_path = depth_path
         self.cam_path = cam_path
@@ -44,6 +46,12 @@ class Frame:
         if self.depth_path is None:
             return None
         return io.read_depth(self.depth_path) * self._layout.depth_scale
+
+    def mask(self, kind: str) -> np.ndarray | None:
+        """Boolean evaluation-region mask (`kind`: "mask" or "window"), True = consider; None if
+        this frame has no such mask."""
+        path = self.mask_paths.get(kind)
+        return None if path is None else io.read_mask(path)
 
     def camera(self) -> Camera | None:
         if self.cam_path is None:
@@ -129,6 +137,8 @@ class AssetDataset:
         self._rgb_dirs = _walk_template(self.root, layout.rgb_dir)
         self._depth_dirs = _walk_template(self.root, layout.depth_dir)
         self._cam_dirs = _walk_template(self.root, layout.cam_dir)
+        self._mask_dirs = {"mask": _walk_template(self.root, layout.mask_dir),
+                           "window": _walk_template(self.root, layout.window_mask_dir)}
         self._pred_depth_dirs = _walk_template(self.root, layout.pred_depth_dir)
         self._pred_cam_dirs = _walk_template(self.root, layout.pred_cam_dir)
         # A colmap run's folder is keyed by {mode} rather than {method}; folded into the same
@@ -238,9 +248,13 @@ class AssetDataset:
             recon = Reconstruction.load(colmap_dir, lay.frame_id)
             frames = [ColmapFrame(i, rgb[i], recon, lay) for i in sorted(rgb)]
             return Sequence(variant, frames)
+        masks: dict[str, dict[int, Path]] = {}
         if source == "gt":
             depth_dir = self._match(self._depth_dirs, variant.as_dict())
             cam_dir = self._match(self._cam_dirs, variant.as_dict())
+            masks = {kind: _index_frames(self._match(dirs, variant.as_dict()),
+                                         lay.mask_exts, self._frame_id)
+                     for kind, dirs in self._mask_dirs.items()}
         else:
             want = {**variant.as_dict(), "method": source}
             depth_dir = self._match(self._pred_depth_dirs, want)
@@ -249,7 +263,9 @@ class AssetDataset:
                 raise KeyError(f"no predictions for method={source!r}, {variant}")
         depth = _index_frames(depth_dir, lay.depth_exts, self._frame_id)
         cam = _index_frames(cam_dir, lay.cam_exts, self._frame_id)
-        frames = [Frame(i, rgb[i], depth.get(i), cam.get(i), lay) for i in sorted(rgb)]
+        frames = [Frame(i, rgb[i], depth.get(i), cam.get(i), lay,
+                        {kind: found.get(i) for kind, found in masks.items()})
+                  for i in sorted(rgb)]
         return Sequence(variant, frames)
 
     @staticmethod
